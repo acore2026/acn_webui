@@ -156,3 +156,73 @@
   font-size: 12px;
   color: var(--accent-green);
 }
+
+.video-status.simulated {
+  color: var(--text-muted);
+}
+
+.video-status.moq {
+  color: var(--accent-cyan);
+  animation: blink 1s infinite;
+}
+
+.moq-card {
+  border-color: var(--accent-cyan);
+  box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
+}
+
+.video-status.connecting {
+  color: var(--accent-cyan);
+  animation: blink 1s infinite;
+}
+
+.video-status.offline {
+  color: var(--accent-red);
+}
+
+.video-notice {
+  padding: 10px;
+  text-align: center;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border-color);
+}
+
+.notice-text {
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.video-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+}
+
+.placeholder-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.placeholder-icon {
+  font-size: 32px;
+  opacity: 0.6;
+}
+
+.placeholder-text {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.real-video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}

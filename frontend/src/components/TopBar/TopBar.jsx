@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './TopBar.css';
 
-const TopBar = () => {
+const TopBar = ({ onToggleDebug, debugEnabled }) => {
   const [currentTime, setCurrentTime] = useState('00:00:00');
   
   // Mock metrics data
@@ -49,6 +49,15 @@ const TopBar = () => {
       </div>
       
       <div className="time-display">{currentTime}</div>
+      
+      <button 
+        className={`settings-btn ${debugEnabled ? 'active' : ''}`}
+        onClick={onToggleDebug}
+        title="Toggle Debug Panel"
+      >
+        <span className="settings-icon">⚙</span>
+        <span className="settings-label">{debugEnabled ? 'DEBUG ON' : 'DEBUG OFF'}</span>
+      </button>
     </header>
   );
 };

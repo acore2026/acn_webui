@@ -6,6 +6,7 @@ import StatusGrid from './components/StatusGrid/StatusGrid';
 import MessageLog from './components/MessageLog/MessageLog';
 import ControlPanel from './components/ControlPanel/ControlPanel';
 import TaskModal from './components/TaskModal/TaskModal';
+import DebugPanel from './components/DebugPanel/DebugPanel';
 import useWebSocket from './hooks/useWebSocket';
 import { mockAgents, mockMessages } from './utils/mockData';
 
@@ -13,15 +14,27 @@ const App = () => {
   const [agents, setAgents] = useState(mockAgents);
   const [messages, setMessages] = useState(mockMessages);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [moqVideoStreams, setMoqVideoStreams] = useState([]);
+  const [moqFrames, setMoqFrames] = useState({}); // track_id -> latest frame
+  const [videoStreams, setVideoStreams] = useState([]);
+  const [debugEnabled, setDebugEnabled] = useState(false); // Debug面板开关
   
-  // WebSocket connection
-  const { sendMessage, lastMessage, connected } = useWebSocket('ws://localhost:9050/ws');
+  // WebSocket connection - 使用相对路径自动适配当前host
+  const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
+  const { sendMessage, lastMessage, connected } = useWebSocket(wsUrl);
+  
+  // 切换Debug面板
+  const toggleDebug = () => {
+    setDebugEnabled(prev => !prev);
+  };
 
   // Handle incoming WebSocket messages
   useEffect(() => {
     if (lastMessage) {
+      console.log('[WebSocket] Received:', lastMessage);
       try {
         const data = JSON.parse(lastMessage);
+        console.log('[WebSocket] Parsed:', data);
         
         switch (data.type) {
           case 'AGENT_LIST':
@@ -40,6 +53,95 @@ const App = () => {
             addMessage('CONTROL', 'ALL AGENTS', 'ABORT ALL TASKS COMMAND ISSUED');
             // Reset all agents to idle
             setAgents(prev => prev.map(a => ({...a, work_status: 'idle', current_task: null})));
+            break;
+          case 'REFRESH_COMPLETE':
+            if (data.payload?.agents) {
+              setAgents(data.payload.agents);
+            }
+            addMessage('CONTROL', 'SYSTEM', 'Environment cleared and agent list refreshed');
+            break;
+          case 'REFRESH_ERROR':
+            addMessage('CONTROL', 'SYSTEM', `Refresh failed: ${data.payload?.error || 'Unknown error'}`);
+            break;
+          case 'PIPELINE_LOG':
+            // Handle pipeline log messages from backend
+            if (data.payload) {
+              const { source, destination, abstract, content } = data.payload;
+              const from = source || 'Unknown';
+              const to = destination || 'Unknown';
+              const displayContent = abstract || content || 'No content';
+              console.log('[PIPELINE_LOG]', from, '->', to, ':', displayContent);
+              addMessage(from, to, displayContent);
+            }
+            break;
+          case 'AGENT_STATUS_UPDATE':
+            // Handle agent status updates from element logs
+            if (data.payload?.agent) {
+              const updatedAgent = data.payload.agent;
+              setAgents(prevAgents => {
+                const existingIndex = prevAgents.findIndex(a => a.agent_id === updatedAgent.agent_id);
+                if (existingIndex >= 0) {
+                  // Update existing agent
+                  const newAgents = [...prevAgents];
+                  newAgents[existingIndex] = {
+                    ...newAgents[existingIndex],
+                    ...updatedAgent,
+                    work_status: updatedAgent.work_status,
+                    current_task: updatedAgent.current_task,
+                    logs: updatedAgent.logs || newAgents[existingIndex].logs
+                  };
+                  return newAgents;
+                } else {
+                  // Add new agent
+                  return [...prevAgents, updatedAgent];
+                }
+              });
+              
+              // Also add to message flow
+              const { element_id, log_type, current_task } = data.payload;
+              addMessage(element_id, updatedAgent.agent_name || updatedAgent.agent_id, `${log_type}: ${current_task}`);
+            }
+            break;
+          case 'VIDEO_STREAM_LIST':
+            // Handle video stream list updates
+            if (data.payload?.streams) {
+              setVideoStreams(data.payload.streams);
+            }
+            break;
+          case 'VIDEO_STREAM_UPDATE':
+            // Handle individual stream updates
+            if (data.payload) {
+              setVideoStreams(prev => {
+                const streamId = data.payload.stream_id;
+                const existingIndex = prev.findIndex(s => s.stream_id === streamId);
+                if (existingIndex >= 0) {
+                  const newStreams = [...prev];
+                  newStreams[existingIndex] = data.payload;
+                  return newStreams;
+                } else {
+                  return [...prev, data.payload];
+                }
+              });
+            }
+            break;
+          case 'VIDEO_FRAME':
+            // Handle MOQ video frame
+            if (data.payload) {
+              const { track_id, group_id, object_id, frame_type, payload_size } = data.payload;
+              // Update latest frame for this track
+              setMoqFrames(prev => ({
+                ...prev,
+                [track_id]: {
+                  group_id,
+                  object_id,
+                  frame_type,
+                  payload_size,
+                  timestamp: new Date()
+                }
+              }));
+              // Add to message flow (optional, can be verbose)
+              // addMessage('MOQ', track_id, `Frame ${object_id} (${frame_type}, ${payload_size} bytes)`);
+            }
             break;
           default:
             break;
@@ -111,9 +213,12 @@ const App = () => {
   };
 
   const handleRefresh = () => {
-    // Reload mock data
-    setAgents(mockAgents);
-    addMessage('CONTROL', 'SYSTEM', 'Agent list refreshed (stub data)');
+    // Send refresh request to backend to call ARF /clear
+    sendMessage({
+      type: 'REFRESH',
+      payload: { timestamp: new Date().toISOString() }
+    });
+    addMessage('CONTROL', 'SYSTEM', 'Sending clear environment request...');
   };
 
   const handleClearMessages = () => {
@@ -122,7 +227,12 @@ const App = () => {
 
   return (
     <div className="app">
-      <TopBar />
+      <TopBar onToggleDebug={toggleDebug} debugEnabled={debugEnabled} />
+      
+      {/* Debug Panel */}
+      {debugEnabled && (
+        <DebugPanel backendUrl={`${window.location.protocol}//${window.location.host}`} />
+      )}
       
       <main className="main-container">
         <SidebarLeft agents={agents} />
@@ -138,7 +248,7 @@ const App = () => {
           />
         </section>
         
-        <SidebarRight />
+        <SidebarRight videoStreams={videoStreams} moqFrames={moqFrames} />
       </main>
       
       <TaskModal 

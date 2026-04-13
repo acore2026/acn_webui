@@ -1,0 +1,148 @@
+.debug-panel {
+  position: fixed;
+  top: 70px;
+  right: 10px;
+  width: 600px;
+  height: 400px;
+  background: rgba(10, 10, 15, 0.98);
+  border: 1px solid var(--accent-cyan);
+  border-radius: 8px;
+  z-index: 9998;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 20px rgba(0, 212, 255, 0.3);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+}
+
+.debug-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border-color);
+  border-radius: 8px 8px 0 0;
+}
+
+.debug-tabs {
+  display: flex;
+  gap: 4px;
+}
+
+.debug-tab {
+  padding: 4px 12px;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.debug-tab:hover {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.debug-tab.active {
+  background: var(--accent-cyan);
+  color: var(--bg-primary);
+  border-color: var(--accent-cyan);
+}
+
+.debug-controls {
+  display: flex;
+  gap: 6px;
+}
+
+.debug-btn {
+  padding: 4px 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  color: var(--text-secondary);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.debug-btn:hover {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.debug-content {
+  flex: 1;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.log-container {
+  height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.log-container::-webkit-scrollbar {
+  width: 6px;
+}
+
+.log-container::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+  border-radius: 3px;
+}
+
+.log-container::-webkit-scrollbar-thumb {
+  background: var(--accent-cyan);
+  border-radius: 3px;
+}
+
+.log-line {
+  display: flex;
+  gap: 8px;
+  padding: 2px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  line-height: 1.4;
+}
+
+.log-time {
+  color: #666;
+  flex-shrink: 0;
+  min-width: 70px;
+}
+
+.log-level {
+  flex-shrink: 0;
+  min-width: 50px;
+  font-weight: bold;
+}
+
+.log-message {
+  color: #ddd;
+  word-break: break-all;
+  white-space: pre-wrap;
+}
+
+.log-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: #555;
+  font-style: italic;
+}
+
+.log-error .log-message {
+  color: #ff6666;
+}
+
+.log-warn .log-message {
+  color: #ffcc66;
+}
+
+.log-info .log-message {
+  color: #66ccff;
+}

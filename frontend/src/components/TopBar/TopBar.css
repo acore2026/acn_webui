@@ -74,3 +74,38 @@
   letter-spacing: 2px;
   text-shadow: 0 0 10px var(--accent-cyan);
 }
+
+.settings-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  margin-left: 15px;
+}
+
+.settings-btn:hover {
+  border-color: var(--accent-cyan);
+  color: var(--accent-cyan);
+}
+
+.settings-btn.active {
+  border-color: var(--accent-green);
+  color: var(--accent-green);
+  background: rgba(0, 255, 136, 0.1);
+}
+
+.settings-icon {
+  font-size: 14px;
+}
+
+.settings-label {
+  font-weight: bold;
+  letter-spacing: 1px;
+}
