@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import './TopBar.css';
 
-const TopBar = ({ onToggleDebug, debugEnabled }) => {
+const TopBar = ({ onToggleDebug, debugEnabled, onToggleTheme, isDarkTheme }) => {
   const [currentTime, setCurrentTime] = useState('00:00:00');
   
   // Mock metrics data
@@ -49,6 +49,15 @@ const TopBar = ({ onToggleDebug, debugEnabled }) => {
       </div>
       
       <div className="time-display">{currentTime}</div>
+      
+      <button 
+        className={`theme-btn ${isDarkTheme ? 'active' : ''}`}
+        onClick={onToggleTheme}
+        title={isDarkTheme ? 'Switch to Light Theme' : 'Switch to Dark Theme'}
+      >
+        <span className="theme-icon">{isDarkTheme ? '☀' : '☾'}</span>
+        <span className="theme-label">{isDarkTheme ? 'LIGHT' : 'DARK'}</span>
+      </button>
       
       <button 
         className={`settings-btn ${debugEnabled ? 'active' : ''}`}

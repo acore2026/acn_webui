@@ -228,122 +228,371 @@ const RealVideoCard = ({ stream, websocket }) => {
   );
 };
 
-const MOQVideoCard = ({ trackId, frameInfo }) => {
+const base64ToBytes = (base64) => {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+};
+
+const findAnnexBStartCode = (bytes, fromIndex = 0) => {
+  for (let i = fromIndex; i < bytes.length - 3; i += 1) {
+    if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1) {
+      return { index: i, length: 3 };
+    }
+    if (
+      i < bytes.length - 4 &&
+      bytes[i] === 0 &&
+      bytes[i + 1] === 0 &&
+      bytes[i + 2] === 0 &&
+      bytes[i + 3] === 1
+    ) {
+      return { index: i, length: 4 };
+    }
+  }
+  return null;
+};
+
+const splitAnnexBH264 = (bytes) => {
+  const nalUnits = [];
+  let cursor = 0;
+
+  while (cursor < bytes.length) {
+    const start = findAnnexBStartCode(bytes, cursor);
+    if (!start) break;
+
+    const naluStart = start.index + start.length;
+    const next = findAnnexBStartCode(bytes, naluStart);
+    const naluEnd = next ? next.index : bytes.length;
+
+    if (naluStart < naluEnd) {
+      nalUnits.push(bytes.slice(naluStart, naluEnd));
+    }
+
+    cursor = naluEnd;
+  }
+
+  return nalUnits;
+};
+
+const parseLengthPrefixedH264 = (bytes) => {
+  const nalUnits = [];
+  let cursor = 0;
+
+  while (cursor + 4 <= bytes.length) {
+    const naluLength =
+      (bytes[cursor] << 24) |
+      (bytes[cursor + 1] << 16) |
+      (bytes[cursor + 2] << 8) |
+      bytes[cursor + 3];
+    const unsignedLength = naluLength >>> 0;
+    cursor += 4;
+
+    if (unsignedLength <= 0 || cursor + unsignedLength > bytes.length) {
+      return null;
+    }
+
+    nalUnits.push(bytes.slice(cursor, cursor + unsignedLength));
+    cursor += unsignedLength;
+  }
+
+  if (!nalUnits.length) {
+    return null;
+  }
+
+  return nalUnits;
+};
+
+const parseH264Payload = (bytes) => {
+  const annexBNalUnits = splitAnnexBH264(bytes);
+  if (annexBNalUnits.length) {
+    return {
+      nalUnits: annexBNalUnits,
+      annexBBytes: bytes
+    };
+  }
+
+  const lengthPrefixedNalUnits = parseLengthPrefixedH264(bytes);
+  if (lengthPrefixedNalUnits?.length) {
+    const annexBParts = [];
+    lengthPrefixedNalUnits.forEach((nal) => {
+      annexBParts.push(new Uint8Array([0, 0, 0, 1]));
+      annexBParts.push(nal);
+    });
+
+    const annexBBytes = new Uint8Array(
+      annexBParts.reduce((sum, part) => sum + part.length, 0)
+    );
+    let offset = 0;
+    annexBParts.forEach((part) => {
+      annexBBytes.set(part, offset);
+      offset += part.length;
+    });
+
+    return {
+      nalUnits: lengthPrefixedNalUnits,
+      annexBBytes
+    };
+  }
+
+  return null;
+};
+
+const buildAvcConfig = (sps, pps) => {
+  if (!sps || !pps || sps.length < 4 || pps.length < 1) {
+    return null;
+  }
+
+  const profileIdc = sps[1];
+  const profileCompat = sps[2];
+  const levelIdc = sps[3];
+  const codec = `avc1.${profileIdc.toString(16).padStart(2, '0')}${profileCompat
+    .toString(16)
+    .padStart(2, '0')}${levelIdc.toString(16).padStart(2, '0')}`;
+
+  const description = new Uint8Array(6 + 2 + sps.length + 1 + 2 + pps.length);
+  let offset = 0;
+  description[offset++] = 1;
+  description[offset++] = profileIdc;
+  description[offset++] = profileCompat;
+  description[offset++] = levelIdc;
+  description[offset++] = 0xff;
+  description[offset++] = 0xe1;
+  description[offset++] = (sps.length >> 8) & 0xff;
+  description[offset++] = sps.length & 0xff;
+  description.set(sps, offset);
+  offset += sps.length;
+  description[offset++] = 1;
+  description[offset++] = (pps.length >> 8) & 0xff;
+  description[offset++] = pps.length & 0xff;
+  description.set(pps, offset);
+
+  return { codec, description };
+};
+
+const H264VideoCard = ({ trackId, frameInfo }) => {
   const canvasRef = useRef(null);
-  const [fps, setFps] = useState(30);
+  const decoderRef = useRef(null);
+  const codecRef = useRef(null);
+  const spsRef = useRef(null);
+  const ppsRef = useRef(null);
+  const [status, setStatus] = useState('connecting');
+  const [error, setError] = useState(null);
+  const [supported, setSupported] = useState(true);
+
+  const drawFrame = (videoFrame) => {
+    const canvas = canvasRef.current;
+    if (!canvas) {
+      videoFrame.close();
+      return;
+    }
+
+    const width = videoFrame.displayWidth || videoFrame.codedWidth || 640;
+    const height = videoFrame.displayHeight || videoFrame.codedHeight || 360;
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(videoFrame, 0, 0, canvas.width, canvas.height);
+    }
+    videoFrame.close();
+  };
+
+  const ensureDecoder = (bytes, parsedNalUnits) => {
+    if (!supported || typeof window.VideoDecoder !== 'function' || typeof window.EncodedVideoChunk !== 'function') {
+      setSupported(false);
+      setStatus('unsupported');
+      return null;
+    }
+
+    const nalUnits = parsedNalUnits || splitAnnexBH264(bytes);
+    const sps = nalUnits.find(nal => (nal[0] & 0x1f) === 7) || spsRef.current;
+    const pps = nalUnits.find(nal => (nal[0] & 0x1f) === 8) || ppsRef.current;
+    if (sps) spsRef.current = sps;
+    if (pps) ppsRef.current = pps;
+
+    const config = buildAvcConfig(spsRef.current, ppsRef.current);
+    if (!config) {
+      setStatus('waiting SPS/PPS');
+      return null;
+    }
+
+    if (!decoderRef.current || codecRef.current !== config.codec) {
+      if (decoderRef.current) {
+        try {
+          decoderRef.current.close();
+        } catch (_) {}
+      }
+
+      const decoder = new window.VideoDecoder({
+        output: drawFrame,
+        error: (err) => {
+          console.error('[MOQ H264] Decoder error:', err);
+          setError(err?.message || String(err));
+          setStatus('decoder error');
+        }
+      });
+
+      try {
+        decoder.configure({
+          codec: config.codec,
+          description: config.description
+        });
+      } catch (err) {
+        console.error('[MOQ H264] Failed to configure decoder:', err);
+        setError(err?.message || String(err));
+        setStatus('configure failed');
+        try {
+          decoder.close();
+        } catch (_) {}
+        return null;
+      }
+
+      decoderRef.current = decoder;
+      codecRef.current = config.codec;
+      setStatus('configured');
+    }
+
+    return decoderRef.current;
+  };
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    
-    const ctx = canvas.getContext('2d');
-    let frame = 0;
-    let animationId;
-
-    const draw = () => {
-      frame++;
-      
-      // Clear canvas with MOQ themed background
-      ctx.fillStyle = '#0a0a1a';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-      
-      // Draw MOQ network visualization
-      ctx.strokeStyle = 'rgba(0, 212, 255, 0.3)';
-      ctx.lineWidth = 1;
-      
-      // Animated grid
-      const gridSize = 30;
-      const offset = (frame * 0.5) % gridSize;
-      for (let x = offset; x <= canvas.width; x += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, canvas.height);
-        ctx.stroke();
-      }
-      for (let y = offset; y <= canvas.height; y += gridSize) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(canvas.width, y);
-        ctx.stroke();
-      }
-      
-      // Draw "receiving" indicator
-      const centerX = canvas.width / 2;
-      const centerY = canvas.height / 2;
-      const pulseRadius = 30 + Math.sin(frame * 0.1) * 10;
-      
-      // Outer pulse
-      ctx.fillStyle = `rgba(0, 255, 136, ${0.3 + Math.sin(frame * 0.1) * 0.2})`;
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, pulseRadius + 20, 0, Math.PI * 2);
-      ctx.fill();
-      
-      // Inner circle
-      ctx.fillStyle = '#00ff88';
-      ctx.beginPath();
-      ctx.arc(centerX, centerY, 15, 0, Math.PI * 2);
-      ctx.fill();
-      
-      // Draw packet indicators
-      if (frameInfo) {
-        const packetCount = frameInfo.object_id % 10;
-        for (let i = 0; i < packetCount; i++) {
-          const angle = (frame * 0.02 + i * 0.6) % (Math.PI * 2);
-          const radius = 60 + i * 8;
-          const x = centerX + Math.cos(angle) * radius;
-          const y = centerY + Math.sin(angle) * radius;
-          
-          ctx.fillStyle = `rgba(0, 212, 255, ${0.5 + Math.sin(frame * 0.1 + i) * 0.3})`;
-          ctx.beginPath();
-          ctx.arc(x, y, 3, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      }
-      
-      animationId = requestAnimationFrame(draw);
-    };
-    
-    draw();
-    
     return () => {
-      cancelAnimationFrame(animationId);
+      if (decoderRef.current) {
+        try {
+          decoderRef.current.close();
+        } catch (_) {}
+        decoderRef.current = null;
+      }
     };
-  }, [frameInfo]);
+  }, []);
+
+  useEffect(() => {
+    const payload = frameInfo?.payload_base64;
+    if (!payload) return;
+
+    try {
+      const bytes = base64ToBytes(payload);
+      const parsed = parseH264Payload(bytes);
+      if (!parsed) {
+        setStatus('waiting for H264');
+        return;
+      }
+      const { nalUnits, annexBBytes } = parsed;
+      const hasIdr = nalUnits.some(nal => (nal[0] & 0x1f) === 5);
+      const decoder = ensureDecoder(bytes, nalUnits);
+      if (!decoder) return;
+
+      const chunkType = frameInfo?.frame_type === 'keyframe' || hasIdr ? 'key' : 'delta';
+      const timestamp = frameInfo?.timestamp ? Date.parse(frameInfo.timestamp) * 1000 : Date.now() * 1000;
+      const chunk = new window.EncodedVideoChunk({
+        type: chunkType,
+        timestamp,
+        data: annexBBytes
+      });
+
+      decoder.decode(chunk);
+      setStatus(chunkType === 'key' ? 'keyframe' : 'live');
+      setError(null);
+    } catch (err) {
+      console.error('[MOQ H264] Failed to decode frame:', err);
+      setError(err?.message || String(err));
+      setStatus('decode failed');
+    }
+  }, [frameInfo?.payload_base64, frameInfo?.frame_type, frameInfo?.timestamp]);
+
+  const displayName = frameInfo?.track_name || trackId.split('_').pop() || 'Video';
+  const agentId = trackId.split('_')[0] || 'Unknown';
 
   return (
     <div className="video-card moq-card">
       <div className="video-container">
-        <canvas 
+        <canvas
           ref={canvasRef}
           width={640}
           height={360}
-          className="video-element"
+          className="video-element moq-image"
         />
+        <div className="video-overlay">
+          <div className="video-stats">MOQ H264</div>
+          <div className="video-stats">
+            {frameInfo?.namespace ? `NS: ${frameInfo.namespace.split('/').pop()}` : 'Waiting for data...'}
+          </div>
+          <div className="video-stats">WebCodecs</div>
+          {error && <div className="video-stats">{error}</div>}
+        </div>
+      </div>
+      <div className="video-info">
+        <span className="video-agent-name">{agentId} - {displayName}</span>
+        <span className={`video-status ${status === 'live' || status === 'keyframe' ? 'moq' : 'connecting'}`}>
+          {supported ? (status === 'live' || status === 'keyframe' ? '● LIVE H264' : '⟳ Decoding') : '○ WebCodecs unavailable'}
+        </span>
+      </div>
+    </div>
+  );
+};
+
+const MOQVideoCard = ({ trackId, frameInfo }) => {
+  const canvasRef = useRef(null);
+  const [fps, setFps] = useState(30);
+  const isRenderable = Boolean(frameInfo?.is_renderable && frameInfo?.data_url);
+  const codec = frameInfo?.codec || (frameInfo?.mime_type === 'video/h264' ? 'h264' : null);
+  const isH264 = codec === 'h264';
+
+  // Extract display info from trackId and frameInfo
+  const displayName = frameInfo?.track_name || trackId.split('_').pop() || 'Video';
+  const agentId = trackId.split('_')[0] || 'Unknown';
+  const status = frameInfo?.status || 'connecting';
+
+  if (isH264) {
+    return <H264VideoCard trackId={trackId} frameInfo={frameInfo} />;
+  }
+
+  return (
+    <div className="video-card moq-card">
+      <div className="video-container">
+        {isRenderable ? (
+          <img
+            src={frameInfo.data_url}
+            alt={`${agentId} ${displayName}`}
+            className="video-element moq-image"
+            draggable="false"
+          />
+        ) : (
+          <canvas 
+            ref={canvasRef}
+            width={640}
+            height={360}
+            className="video-element"
+          />
+        )}
         <div className="video-overlay">
           <div className="video-stats">MOQ Protocol</div>
           <div className="video-stats">
-            {frameInfo ? `Obj: ${frameInfo.object_id} | ${frameInfo.payload_size} bytes` : 'Waiting...'}
+            {frameInfo?.namespace ? `NS: ${frameInfo.namespace.split('/').pop()}` : 'Waiting for data...'}
+          </div>
+          <div className="video-stats">
+            {frameInfo?.mime_type ? frameInfo.mime_type : (codec ? `codec:${codec}` : 'unknown')}
           </div>
         </div>
       </div>
       <div className="video-info">
-        <span className="video-agent-name">{trackId}</span>
-        <span className="video-status moq">● MOQ</span>
+        <span className="video-agent-name">{agentId} - {displayName}</span>
+        <span className={`video-status ${status === 'subscribed' ? 'moq' : 'connecting'}`}>
+          {isRenderable ? '● LIVE MOQ' : status === 'subscribed' ? '● MOQ' : '⟳ Connecting'}
+        </span>
       </div>
     </div>
   );
 };
 
 const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
-  // Use real streams if available, otherwise show simulated feeds
+  // Use real streams if available
   const hasRealStreams = videoStreams && videoStreams.length > 0;
   const hasMoqStreams = Object.keys(moqFrames).length > 0;
-
-  // Default simulated videos (fallback)
-  const simulatedVideos = [
-    { agentName: 'Drone Alpha - Front Cam', type: 'camera' },
-    { agentName: 'Drone Beta - Thermal Cam', type: 'thermal' }
-  ];
 
   return (
     <aside className="sidebar-right">
@@ -351,7 +600,7 @@ const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
         <span className="panel-title">LIVE FEEDS</span>
         <span className="panel-count">
           {hasMoqStreams ? Object.keys(moqFrames).length : 
-           hasRealStreams ? videoStreams.length : simulatedVideos.length}
+           hasRealStreams ? videoStreams.length : 0}
         </span>
       </div>
 
@@ -374,14 +623,12 @@ const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
             />
           ))
         ) : (
-          // Show simulated video feeds
-          simulatedVideos.map((video, index) => (
-            <SimulatedVideoCard
-              key={index}
-              index={index}
-              agentName={video.agentName}
-            />
-          ))
+          // Empty state
+          <div className="video-empty-state">
+            <span className="empty-icon">📹</span>
+            <span className="empty-text">No video streams available</span>
+            <span className="empty-subtext">Waiting for agent connections...</span>
+          </div>
         )}
       </div>
 
@@ -389,12 +636,6 @@ const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
         <div className="video-notice">
           <span className="notice-text">🔗 Receiving MOQ video streams from relay
           </span>
-        </div>
-      )}
-      
-      {!hasMoqStreams && !hasRealStreams && (
-        <div className="video-notice">
-          <span className="notice-text">ኁ61 Simulated feeds. Connect agents to see real video.</span>
         </div>
       )}
     </aside>

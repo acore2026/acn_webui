@@ -13,6 +13,7 @@
   border-left: 3px solid var(--accent-blue);
   background: var(--bg-panel);
   animation: slideIn 0.3s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
 }
 
 .message-time {
@@ -26,7 +27,7 @@
 }
 
 .message-arrow {
-  color: var(--accent-cyan);
+  color: var(--accent-blue);
   margin: 0 8px;
 }
 
@@ -44,4 +45,5 @@
 .clear-btn:hover {
   border-color: var(--accent-red);
   color: var(--accent-red);
+  background: rgba(239, 68, 68, 0.05);
 }

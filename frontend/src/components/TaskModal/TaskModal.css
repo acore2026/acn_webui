@@ -4,7 +4,7 @@
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(0, 0, 0, 0.8);
+  background: rgba(0, 0, 0, 0.5);
   z-index: 2000;
   display: flex;
   align-items: center;
@@ -17,7 +17,7 @@
   border-radius: 10px;
   width: 90%;
   max-width: 500px;
-  box-shadow: var(--glow-blue);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
 }
 
 .modal-header {
@@ -31,7 +31,7 @@
 .modal-title {
   font-size: 16px;
   font-weight: bold;
-  color: var(--accent-cyan);
+  color: var(--accent-blue);
   letter-spacing: 1px;
 }
 
@@ -79,6 +79,7 @@
 .form-group textarea:focus {
   outline: none;
   border-color: var(--accent-blue);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
 }
 
 .form-group textarea {
@@ -112,7 +113,7 @@
 
 .btn.primary:hover {
   background: var(--accent-cyan);
-  box-shadow: var(--glow-cyan);
+  box-shadow: 0 0 15px rgba(14, 165, 233, 0.3);
 }
 
 .btn.secondary {
@@ -124,4 +125,5 @@
 .btn.secondary:hover {
   border-color: var(--text-primary);
   color: var(--text-primary);
+  background: var(--bg-hover);
 }

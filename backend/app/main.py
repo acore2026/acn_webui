@@ -6,10 +6,11 @@ Port: 9005
 """
 
 import asyncio
+import base64
 import json
 import sqlite3
 from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -24,6 +25,7 @@ from .video_stream import video_stream_manager, StreamStatus
 # Import MOQ video subscriber
 try:
     from .moq_video import moq_video_subscriber, VideoFrame
+
     MOQ_AVAILABLE = True
 except ImportError as e:
     print(f"[Warning] MOQ video subscriber not available: {e}")
@@ -37,26 +39,31 @@ DB_PATH = "/home/acn/cxr/acn_gw/agent_gw/agent_gw.db"
 ARF_HOST = "localhost"  # ARF service host
 ARF_CLEAR_URL = f"http://{ARF_HOST}:9001/clear"
 
+
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
-    
+
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
         print(f"[WebSocket] Client connected. Total: {len(self.active_connections)}")
-    
+
     def disconnect(self, websocket: WebSocket):
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
-            print(f"[WebSocket] Client disconnected. Total: {len(self.active_connections)}")
-    
+            print(
+                f"[WebSocket] Client disconnected. Total: {len(self.active_connections)}"
+            )
+
     async def broadcast(self, message: dict):
         disconnected = []
         msg_type = message.get("type", "unknown")
-        print(f"[Broadcast] Sending {msg_type} to {len(self.active_connections)} clients")
-        
+        print(
+            f"[Broadcast] Sending {msg_type} to {len(self.active_connections)} clients"
+        )
+
         for connection in self.active_connections:
             try:
                 await connection.send_json(message)
@@ -64,21 +71,23 @@ class ConnectionManager:
             except Exception as e:
                 print(f"[Broadcast] Failed to send: {e}")
                 disconnected.append(connection)
-        
+
         # Remove disconnected clients
         for conn in disconnected:
             self.disconnect(conn)
-    
+
     async def send_to(self, websocket: WebSocket, message: dict):
         try:
             await websocket.send_json(message)
         except:
             pass
 
+
 manager = ConnectionManager()
 
 # Set connection manager for video stream manager
 video_stream_manager.set_connection_manager(manager)
+
 
 # Database helper
 def get_agents_from_db() -> List[Dict[str, Any]]:
@@ -87,93 +96,190 @@ def get_agents_from_db() -> List[Dict[str, Any]]:
         conn = sqlite3.connect(DB_PATH)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
+
         # Get all agents
         cursor.execute("SELECT * FROM agents")
         rows = cursor.fetchall()
-        
+
         # Get all agents with active tasks (agents that have entries in tasks table)
         cursor.execute("SELECT DISTINCT agent_id FROM tasks")
         agents_with_tasks = {row[0] for row in cursor.fetchall()}
-        
+
         conn.close()
-        
+
         agents = []
         for row in rows:
             agent = dict(row)
             # Parse JSON capabilities
-            if agent.get('agent_capability'):
+            if agent.get("agent_capability"):
                 try:
-                    agent['agent_capability'] = json.loads(agent['agent_capability'])
+                    agent["agent_capability"] = json.loads(agent["agent_capability"])
                 except:
-                    agent['agent_capability'] = []
+                    agent["agent_capability"] = []
             else:
-                agent['agent_capability'] = []
-            
+                agent["agent_capability"] = []
+
             # Determine agent status: if agent has task_id (exists in tasks table), mark as working
-            original_status = agent.get('agent_status', 'offline')
-            if agent.get('agent_id') in agents_with_tasks:
-                agent['agent_status'] = 'working'
+            original_status = agent.get("agent_status", "offline")
+            if agent.get("agent_id") in agents_with_tasks:
+                agent["agent_status"] = "working"
             else:
-                agent['agent_status'] = original_status if original_status else 'offline'
-            
+                agent["agent_status"] = (
+                    original_status if original_status else "offline"
+                )
+
             agents.append(agent)
         return agents
     except Exception as e:
         print(f"[Database Error] {e}")
         return []
 
+
 # ARF Service helper
 async def call_arf_clear() -> Dict[str, Any]:
     """Call ARF /clear endpoint to reset environment"""
     try:
-        async with httpx.AsyncClient() as client:
-            payload = {
-                "method": "POST",
-                "url": "/clear",
-                "body": {}
-            }
+        async with httpx.AsyncClient(trust_env=False) as client:
+            payload = {"method": "POST", "url": "/clear", "body": {}}
             print(f"[ARF] Sending clear request to {ARF_CLEAR_URL}")
             response = await client.post(
                 ARF_CLEAR_URL,
                 json=payload,
                 headers={"Content-Type": "application/json"},
-                timeout=10.0
+                timeout=10.0,
             )
             print(f"[ARF] Clear response: {response.status_code}")
             return {
                 "success": response.status_code == 200,
                 "status_code": response.status_code,
-                "response": response.json() if response.status_code == 200 else None
+                "response": response.json() if response.status_code == 200 else None,
             }
     except httpx.ConnectError as e:
         print(f"[ARF Error] Cannot connect to ARF service: {e}")
-        return {"success": False, "error": "Cannot connect to ARF service", "detail": str(e)}
+        return {
+            "success": False,
+            "error": "Cannot connect to ARF service",
+            "detail": str(e),
+        }
     except Exception as e:
         print(f"[ARF Error] {e}")
         return {"success": False, "error": str(e)}
 
+
 # Video frame handler for MOQ
-async def handle_moq_video_frame(frame: 'VideoFrame'):
+async def handle_moq_video_frame(frame: "VideoFrame"):
     """Handle received video frame from MOQ"""
+    payload_b64 = base64.b64encode(frame.payload).decode("ascii")
+    mime_type = _infer_moq_mime_type(frame.payload)
+    codec = _infer_moq_codec(frame.payload)
+
+    payload_preview = (
+        frame.payload[:20].hex() if len(frame.payload) >= 20 else frame.payload.hex()
+    )
+    print(
+        f"[VIDEO_FRAME] track={frame.track_name[:50]} mime={mime_type} codec={codec} size={len(frame.payload)} payload_preview={payload_preview}"
+    )
+
+    # Force H264 if payload looks like video data
+    if mime_type == "application/octet-stream" and len(frame.payload) > 100:
+        mime_type = "video/h264"
+        codec = "h264"
+
     # Broadcast to all WebSocket clients
-    await manager.broadcast({
-        "type": "VIDEO_FRAME",
-        "payload": {
-            "track_id": frame.track_name,
-            "group_id": frame.group_id,
-            "object_id": frame.object_id,
-            "timestamp": frame.timestamp.isoformat(),
-            "frame_type": frame.frame_type,
-            "payload_size": len(frame.payload)
-            # Note: Actual video data is not sent via WebSocket
-            # Instead, we send metadata and use a separate mechanism
+    await manager.broadcast(
+        {
+            "type": "VIDEO_FRAME",
+            "payload": {
+                "track_id": frame.track_name,
+                "group_id": frame.group_id,
+                "object_id": frame.object_id,
+                "timestamp": frame.timestamp.isoformat(),
+                "frame_type": frame.frame_type,
+                "payload_size": len(frame.payload),
+                "mime_type": mime_type,
+                "codec": codec,
+                "payload_base64": payload_b64,
+                "data_url": f"data:{mime_type};base64,{payload_b64}",
+            },
         }
-    })
+    )
+
+    # Broadcast to all WebSocket clients
+    await manager.broadcast(
+        {
+            "type": "VIDEO_FRAME",
+            "payload": {
+                "track_id": frame.track_name,
+                "group_id": frame.group_id,
+                "object_id": frame.object_id,
+                "timestamp": frame.timestamp.isoformat(),
+                "frame_type": frame.frame_type,
+                "payload_size": len(frame.payload),
+                "mime_type": mime_type,
+                "codec": codec,
+                "payload_base64": payload_b64,
+                "data_url": f"data:{mime_type};base64,{payload_b64}",
+            },
+        }
+    )
+
 
 def on_moq_track_subscribed(track_id: str):
     """Handler for MOQ track subscribed"""
     print(f"[MOQ] Track subscribed: {track_id}")
+
+
+def _infer_moq_mime_type(payload: bytes) -> str:
+    """Infer a browser-friendly MIME type from MOQ payload bytes."""
+    if payload.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if payload.startswith(b"GIF87a") or payload.startswith(b"GIF89a"):
+        return "image/gif"
+    if payload.startswith(b"RIFF") and len(payload) >= 12 and payload[8:12] == b"WEBP":
+        return "image/webp"
+    if _looks_like_h264(payload):
+        return "video/h264"
+
+    # Default to octet-stream so the frontend can decide whether to render
+    # the frame or fall back to a placeholder.
+    return "application/octet-stream"
+
+
+def _looks_like_h264(payload: bytes) -> bool:
+    """Best-effort detection for Annex B H.264 payloads."""
+    if len(payload) < 5:
+        return False
+
+    start_code_len = 0
+    if payload.startswith(b"\x00\x00\x00\x01"):
+        start_code_len = 4
+    elif payload.startswith(b"\x00\x00\x01"):
+        start_code_len = 3
+    else:
+        if len(payload) < 8:
+            return False
+        nal_length = int.from_bytes(payload[0:4], "big")
+        if nal_length <= 0 or nal_length + 4 > len(payload):
+            return False
+        nal_type = payload[4] & 0x1F
+        return nal_type in {1, 5, 6, 7, 8}
+
+    nal_header_index = start_code_len
+    if nal_header_index >= len(payload):
+        return False
+
+    nal_type = payload[nal_header_index] & 0x1F
+    return nal_type in {1, 5, 6, 7, 8}
+
+
+def _infer_moq_codec(payload: bytes) -> str | None:
+    """Infer a codec hint for browser-side rendering."""
+    if _looks_like_h264(payload):
+        return "h264"
+    return None
+
 
 # Lifespan context
 @asynccontextmanager
@@ -184,43 +290,44 @@ async def lifespan(app: FastAPI):
     print(f"API: http://0.0.0.0:9005")
     print(f"WebSocket: ws://0.0.0.0:9005/ws")
     print("=" * 60)
-    
+
     # Start background task for agent updates
     task = asyncio.create_task(broadcast_agent_updates())
-    
+
     # Start MOQ video subscriber
     moq_task = None
     if MOQ_AVAILABLE:
         print("[MOQ] Starting video subscriber...")
         moq_video_subscriber.set_callbacks(
             on_frame_received=handle_moq_video_frame,
-            on_track_subscribed=on_moq_track_subscribed
+            on_track_subscribed=on_moq_track_subscribed,
         )
         await moq_video_subscriber.start()
         moq_task = moq_video_subscriber._connection_task
-    
+
     yield
-    
+
     # Cancel background task on shutdown
     task.cancel()
     try:
         await task
     except asyncio.CancelledError:
         pass
-    
+
     # Stop MOQ subscriber
     if MOQ_AVAILABLE:
         print("[MOQ] Stopping video subscriber...")
         await moq_video_subscriber.stop()
-    
+
     print("[Shutdown] Backend stopping...")
+
 
 # Create FastAPI app
 app = FastAPI(
     title="ACN Agent Monitor Backend",
     description="Backend API and WebSocket for ACN Agent Monitor",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
 )
 
 # CORS configuration
@@ -232,15 +339,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # API Routes
 @app.get("/api/agents", response_model=Dict[str, Any])
 async def get_agents():
     """Get all registered agents"""
     agents = get_agents_from_db()
-    return {
-        "agents": agents,
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"agents": agents, "timestamp": datetime.utcnow().isoformat()}
+
 
 @app.get("/api/health")
 async def health_check():
@@ -248,23 +354,26 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.utcnow().isoformat(),
-        "websocket_clients": len(manager.active_connections)
+        "websocket_clients": len(manager.active_connections),
     }
+
 
 # Log buffer for frontend display
 log_buffer = []
 max_log_entries = 1000
+
 
 def add_log_entry(message: str, level: str = "info"):
     """Add a log entry to the buffer"""
     log_entry = {
         "time": datetime.utcnow().isoformat(),
         "level": level,
-        "message": message
+        "message": message,
     }
     log_buffer.append(log_entry)
     if len(log_buffer) > max_log_entries:
         log_buffer.pop(0)
+
 
 @app.get("/api/logs")
 async def get_logs(limit: int = 100):
@@ -272,8 +381,9 @@ async def get_logs(limit: int = 100):
     return {
         "logs": log_buffer[-limit:] if log_buffer else [],
         "total": len(log_buffer),
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 # MOQ Video Stream API Endpoints (outside static file block)
 @app.get("/api/moq/status")
@@ -282,7 +392,7 @@ async def get_moq_status():
     if not MOQ_AVAILABLE:
         return {
             "status": "unavailable",
-            "message": "MOQ video subscriber not available"
+            "message": "MOQ video subscriber not available",
         }
 
     return {
@@ -291,8 +401,10 @@ async def get_moq_status():
         "relay_host": moq_video_subscriber.relay_host,
         "relay_port": moq_video_subscriber.relay_port,
         "subscribed_tracks": moq_video_subscriber.get_subscribed_tracks(),
-        "timestamp": datetime.utcnow().isoformat()
+        "subscription_debug": moq_video_subscriber.get_track_debug_info(),
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 @app.post("/api/moq/subscribe")
 async def subscribe_moq_track(request: Dict[str, Any]):
@@ -308,9 +420,7 @@ async def subscribe_moq_track(request: Dict[str, Any]):
         return {"status": "error", "message": "Missing track_id or track_name"}
 
     success = await moq_video_subscriber.subscribe_to_track(
-        track_id=track_id,
-        namespace=namespace,
-        track_name=track_name
+        track_id=track_id, namespace=namespace, track_name=track_name
     )
 
     if success:
@@ -319,10 +429,11 @@ async def subscribe_moq_track(request: Dict[str, Any]):
             "track_id": track_id,
             "namespace": namespace,
             "track_name": track_name,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     return {"status": "error", "message": "Failed to subscribe"}
+
 
 @app.post("/api/moq/unsubscribe/{track_id}")
 async def unsubscribe_moq_track(track_id: str):
@@ -335,8 +446,9 @@ async def unsubscribe_moq_track(track_id: str):
     return {
         "status": "success",
         "track_id": track_id,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 @app.get("/api/moq/tracks/{track_id}/frames")
 async def get_moq_track_frames(track_id: str, limit: int = 10):
@@ -356,44 +468,233 @@ async def get_moq_track_frames(track_id: str, limit: int = 10):
                 "object_id": f.object_id,
                 "timestamp": f.timestamp.isoformat(),
                 "frame_type": f.frame_type,
-                "payload_size": len(f.payload)
+                "payload_size": len(f.payload),
             }
             for f in recent_frames
         ],
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
 
 @app.post("/api/moq/auto-subscribe/{agent_id}")
 async def auto_subscribe_agent(agent_id: str):
-    """Auto-subscribe to common video tracks for an agent"""
+    """
+    Auto-subscribe to common video tracks for an agent.
+    NOTE: This endpoint is deprecated. Please use /api/acn/v3/subscribe_track
+    with proper namespace information from ACF.
+    """
     if not MOQ_AVAILABLE:
         return {"status": "error", "message": "MOQ not available"}
 
-    # Common video tracks for an agent
-    tracks = [
-        ("camera", ["acn", "agent", agent_id], "camera"),
-        ("thermal", ["acn", "agent", agent_id], "thermal"),
-    ]
-
-    results = []
-    for track_id_suffix, namespace, track_name in tracks:
-        track_id = f"{agent_id}_{track_id_suffix}"
-        success = await moq_video_subscriber.subscribe_to_track(
-            track_id=track_id,
-            namespace=namespace,
-            track_name=track_name
-        )
-        results.append({
-            "track_id": track_id,
-            "success": success
-        })
+    # DEPRECATED: Hardcoded namespace format no longer matches Publisher's namespace format
+    # Publisher uses: /{task_id}/{agent_id} (e.g., /task-fa4af/did:udid:...)
+    # This endpoint no longer performs automatic subscription to avoid namespace mismatch.
+    #
+    # To subscribe to video tracks, ACF should call:
+    # POST /api/acn/v3/subscribe_track
+    # with body containing:
+    # {
+    #     "payload": {
+    #         "dst_agent_id": "...",
+    #         "task_id": "task-xxx",
+    #         "track_list": [
+    #             {"namespace": "/task-xxx/did:...", "track": "Video"}
+    #         ]
+    #     }
+    # }
 
     return {
-        "status": "success",
+        "status": "warning",
         "agent_id": agent_id,
-        "results": results,
-        "timestamp": datetime.utcnow().isoformat()
+        "message": "Auto-subscribe with hardcoded namespace is deprecated. Use /api/acn/v3/subscribe_track with proper namespace from ACF.",
+        "timestamp": datetime.utcnow().isoformat(),
     }
+
+
+@app.post("/api/acn/v3/subscribe_track")
+async def subscribe_tracks_from_acf(request: Request):
+    """
+    Receive track list from ACF and auto-subscribe to video tracks
+
+    Request body format:
+    {
+        "method": "POST",
+        "url": "/ACN_v3/subscribe_track",
+        "headers": {"Content-Type": "application/json"},
+        "body": {
+            "type": "SUBSCRIBE_TRACK",
+            "timestamp": "2026-04-13T10:20:30Z",
+            "payload": {
+                "src_agent_id": "ACF",
+                "dst_agent_id": "did:acn:agent:222222222",
+                "task_id": "task-12345",
+                "track_list": [
+                    {"namespace": "/task-12345/did:acn:agent:222222222", "track": "Video"},
+                    {"namespace": "/task-12345/did:acn:agent:222222222", "track": "Location"}
+                ]
+            }
+        }
+    }
+    """
+    try:
+        raw_body = await request.body()
+        body_text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
+
+        # Extract body (support both direct and nested formats)
+        body: Dict[str, Any] = {}
+        if raw_body:
+            try:
+                parsed = await request.json()
+                if isinstance(parsed, dict):
+                    body = parsed
+                elif isinstance(parsed, list):
+                    body = {"track_list": parsed}
+                else:
+                    body = {"payload": parsed}
+            except Exception:
+                # Fall back to text for non-JSON payloads.
+                body = {"raw_body": body_text}
+
+        if "body" in body and isinstance(body["body"], dict):
+            body = body["body"]
+
+        payload = body.get("payload", body)
+        if not isinstance(payload, dict):
+            payload = {}
+
+        track_list = (
+            payload.get("track_list")
+            or payload.get("tracklist")
+            or payload.get("trackList")
+            or payload.get("tracks")
+            or body.get("track_list")
+            or body.get("tracklist")
+            or body.get("trackList")
+            or body.get("tracks")
+            or []
+        )
+        if not isinstance(track_list, list):
+            track_list = []
+
+        dst_agent_id = (
+            payload.get("dst_agent_id") or body.get("dst_agent_id") or "unknown"
+        )
+        task_id = payload.get("task_id") or body.get("task_id") or "unknown"
+
+        print(
+            f"[Subscribe Track] Received {len(track_list)} tracks for agent {dst_agent_id}, task {task_id}"
+        )
+        if body_text:
+            print(f"[Subscribe Track] Raw body: {body_text}")
+        add_log_entry(
+            f"ACF subscribe_track received: agent={dst_agent_id} task={task_id} tracks={len(track_list)}",
+            "info",
+        )
+
+        if not MOQ_AVAILABLE:
+            return {
+                "status": "error",
+                "message": "MOQ not available",
+                "timestamp": datetime.utcnow().isoformat(),
+            }
+
+        # Filter video tracks and subscribe
+        video_tracks = []
+        subscribed_tracks = []
+
+        for track_info in track_list:
+            if not isinstance(track_info, dict):
+                continue
+
+            namespace_str = track_info.get("namespace", "")
+            track_name = track_info.get("track", "")
+            if not isinstance(namespace_str, str):
+                namespace_str = "/".join(str(part) for part in namespace_str if part)
+            if not isinstance(track_name, str):
+                track_name = str(track_name)
+
+            # Check if it's a video track (case-insensitive)
+            normalized_track_name = track_name.lower()
+            if normalized_track_name in ["video", "camera", "thermal"]:
+                # Parse namespace (e.g., "/task-12345/did:acn:agent:222222222")
+                namespace_parts = [p for p in namespace_str.split("/") if p]
+
+                # Create track_id
+                track_id = f"{dst_agent_id}_{task_id}_{normalized_track_name}"
+
+                print(
+                    f"[Subscribe Track] Subscribing to video track: {track_id}, namespace: {namespace_parts}, track: {track_name}"
+                )
+                add_log_entry(
+                    f"MOQ subscribe request: track_id={track_id} namespace={namespace_str} track={track_name}",
+                    "info",
+                )
+
+                # Subscribe to MOQ track
+                success = await moq_video_subscriber.subscribe_to_track(
+                    track_id=track_id,
+                    namespace=namespace_parts,
+                    track_name=track_name,
+                )
+
+                video_tracks.append(
+                    {
+                        "track_id": track_id,
+                        "namespace": namespace_str,
+                        "track_name": track_name,
+                        "success": success,
+                    }
+                )
+
+                if success:
+                    subscribed_tracks.append(track_id)
+                else:
+                    add_log_entry(
+                        f"MOQ subscribe failed: track_id={track_id} namespace={namespace_str} track={track_name}",
+                        "error",
+                    )
+
+        # Broadcast to frontend about new video tracks
+        if subscribed_tracks:
+            await manager.broadcast(
+                {
+                    "type": "VIDEO_TRACKS_AVAILABLE",
+                    "payload": {
+                        "agent_id": dst_agent_id,
+                        "task_id": task_id,
+                        "tracks": video_tracks,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                }
+            )
+
+        add_log_entry(
+            f"ACF -> Monitor: Subscribed {len(subscribed_tracks)} video tracks for {dst_agent_id}",
+            "info",
+        )
+
+        return {
+            "status": "success",
+            "agent_id": dst_agent_id,
+            "task_id": task_id,
+            "total_tracks": len(track_list),
+            "video_tracks": video_tracks,
+            "subscribed_count": len(subscribed_tracks),
+            "subscription_debug": moq_video_subscriber.get_track_debug_info(),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
+    except Exception as e:
+        print(f"[Subscribe Track Error] {e}")
+        import traceback
+
+        traceback.print_exc()
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.utcnow().isoformat(),
+        }
+
 
 @app.post("/acn/v3/pipeline-logs")
 async def receive_pipeline_log(request: Dict[str, Any]):
@@ -401,7 +702,7 @@ async def receive_pipeline_log(request: Dict[str, Any]):
     try:
         # Debug: print full request
         print(f"[Pipeline Log] Raw request: {request}")
-        
+
         # Extract the message body - support both formats:
         # 1. {source, destination, ...} - direct format
         # 2. {body: {source, destination, ...}} - nested format
@@ -409,9 +710,9 @@ async def receive_pipeline_log(request: Dict[str, Any]):
             body = request["body"]
         else:
             body = request
-        
+
         print(f"[Pipeline Log] Body: {body}")
-        
+
         # Create the log message structure
         log_message = {
             "type": "PIPELINE_LOG",
@@ -423,28 +724,100 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                 "protocol": body.get("protocol", ""),
                 "headers": body.get("headers", ""),
                 "abstract": body.get("abstract", ""),
-                "content": body.get("content", "")
-            }
+                "content": body.get("content", ""),
+            },
         }
-        
+
         log_msg = f"{log_message['payload']['source']} -> {log_message['payload']['destination']}: {log_message['payload']['abstract'] or log_message['payload']['content'][:50]}"
         print(f"[Pipeline Log] {log_msg}")
         add_log_entry(log_msg, "info")
-        
+
         # Broadcast to all connected WebSocket clients
         await manager.broadcast(log_message)
-        
+
+        # Update agent status based on abstract
+        abstract = body.get("abstract", "")
+        if abstract:
+            work_status, task_desc = get_work_status_from_abstract(abstract)
+            if work_status != "idle":
+                # Try to extract agent_id from content
+                content = body.get("content", {})
+                if isinstance(content, str):
+                    try:
+                        content = json.loads(content)
+                    except:
+                        content = {}
+
+                agent_id = content.get("agent_id", "")
+                agent_name = content.get("agent_name", content.get("name", ""))
+
+                # For video tracking, use task_id to identify the agent
+                if not agent_id and abstract in [
+                    "Send MoQ object",
+                    "Publish MoQ track",
+                    "Announce MoQ published track",
+                ]:
+                    task_id = body.get("task_id", "")
+                    if task_id:
+                        # Find agent with this task_id in cache
+                        for cached_id, cached_data in agent_status_cache.items():
+                            if task_id in str(cached_data):
+                                agent_id = cached_id
+                                agent_name = cached_data.get("agent_name", "")
+                                break
+
+                if agent_id:
+                    timestamp = body.get("timestamp", datetime.utcnow().isoformat())
+
+                    # Update agent status cache
+                    if agent_id not in agent_status_cache:
+                        agent_status_cache[agent_id] = {
+                            "agent_id": agent_id,
+                            "agent_name": agent_name or agent_id.split(":")[-1][:20],
+                            "work_status": work_status,
+                            "current_task": task_desc,
+                            "logs": [],
+                            "agent_status": "online",
+                            "agent_capability": [],
+                            "last_update": timestamp,
+                        }
+                    else:
+                        agent_status_cache[agent_id]["work_status"] = work_status
+                        agent_status_cache[agent_id]["current_task"] = task_desc
+                        if agent_name:
+                            agent_status_cache[agent_id]["agent_name"] = agent_name
+                        agent_status_cache[agent_id]["last_update"] = timestamp
+
+                    # Broadcast status update
+                    status_message = {
+                        "type": "AGENT_STATUS_UPDATE",
+                        "payload": {
+                            "agent_id": agent_id,
+                            "agent_name": agent_status_cache[agent_id]["agent_name"],
+                            "work_status": work_status,
+                            "current_task": task_desc,
+                            "log_type": abstract,
+                            "element_id": body.get("source", "Pipeline"),
+                            "timestamp": timestamp,
+                            "agent": agent_status_cache.get(agent_id, {}),
+                        },
+                    }
+                    print(
+                        f"[Pipeline Status] {abstract} -> Agent: {agent_id[:30]}... | Status: {work_status}"
+                    )
+                    await manager.broadcast(status_message)
+
         return {
             "status": "success",
             "message": "Log received and broadcasted",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
         print(f"[Pipeline Log Error] {e}")
         return {
             "status": "error",
             "message": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
 
@@ -458,9 +831,33 @@ def get_work_status_from_log_type(log_type: str) -> tuple:
         "ApplyProfile": ("working", "Applying for digital identity"),
         "PublishAgent": ("working", "Registering agent capabilities"),
         "SetupConnection": ("online", "Setting up connection"),
-        "LLMMessage": ("working", "Processing LLM message")
+        "LLMMessage": ("working", "Processing LLM message"),
+        "TargetTracking": ("tracking", "Tracking target"),
+        "LocationTracking": ("tracking", "Tracking location"),
+        "VideoTracking": ("tracking", "Tracking video"),
+        "PersonExpelling": ("expelling", "Expelling suspicious person"),
+        "SuspiciousPerson": ("expelling", "Identifying suspicious person"),
+        "EmergencyAlert": ("expelling", "Emergency alert"),
+        "TaskExecution": ("working", "Executing task"),
+        "VideoStream": ("working", "Streaming video"),
+        "LocationUpdate": ("working", "Updating location"),
     }
     return status_map.get(log_type, ("idle", "Unknown task"))
+
+
+def get_work_status_from_abstract(abstract: str) -> tuple:
+    """Map pipeline-logs abstract to work_status and task description"""
+    status_map = {
+        "Register agent identity": ("working", "Registering identity"),
+        "Register agent capabilities": ("working", "Registering capabilities"),
+        "Request task execution": ("working", "Executing task"),
+        "Request task collaboration": ("working", "Collaborating"),
+        "Publish MoQ track": ("tracking", "Publishing video track"),
+        "Announce MoQ published track": ("tracking", "Video track published"),
+        "Send MoQ object": ("tracking", "Streaming video data"),
+        "WebSocket setup handshake": ("online", "Setting up connection"),
+    }
+    return status_map.get(abstract, ("idle", abstract))
 
 
 @app.post("/acn/v3/element-logs")
@@ -472,41 +869,49 @@ async def receive_element_log(request: Dict[str, Any]):
             body = request["body"]
         else:
             body = request
-        
+
         element_id = body.get("element_id", "Unknown")
         log_type = body.get("log_type", "Unknown")
         content = body.get("content", {})
         timestamp = body.get("timestamp", datetime.utcnow().isoformat())
-        
+
         # Extract agent_id from content
         agent_id = content.get("agent_id", "")
         agent_name = content.get("agent_name", "")
-        
+
         # Determine work status based on log_type
         work_status, task_desc = get_work_status_from_log_type(log_type)
-        
+
         # Create log entry
         log_entry = {
-            "time": datetime.fromisoformat(timestamp.replace('Z', '+00:00')).strftime('%H:%M:%S') if 'T' in timestamp else datetime.now().strftime('%H:%M:%S'),
+            "time": datetime.fromisoformat(timestamp.replace("Z", "+00:00")).strftime(
+                "%H:%M:%S"
+            )
+            if "T" in timestamp
+            else datetime.now().strftime("%H:%M:%S"),
             "level": "info",
-            "message": f"{log_type}: {task_desc}"
+            "message": f"{log_type}: {task_desc}",
         }
-        
+
         # Add to log buffer
         add_log_entry(f"[{element_id}] {agent_id}: {log_type} - {task_desc}", "info")
-        
+
         # Update agent status cache
         if agent_id:
             if agent_id not in agent_status_cache:
                 agent_status_cache[agent_id] = {
                     "agent_id": agent_id,
-                    "agent_name": agent_name or agent_id.split(':')[-1][:20],
+                    "agent_name": agent_name or agent_id.split(":")[-1][:20],
                     "work_status": work_status,
                     "current_task": task_desc,
                     "logs": [],
                     "agent_status": "online",
-                    "agent_capability": content.get("agent_capability", []) if isinstance(content.get("agent_capability"), list) else [content.get("agent_capability", "")] if content.get("agent_capability") else [],
-                    "last_update": timestamp
+                    "agent_capability": content.get("agent_capability", [])
+                    if isinstance(content.get("agent_capability"), list)
+                    else [content.get("agent_capability", "")]
+                    if content.get("agent_capability")
+                    else [],
+                    "last_update": timestamp,
                 }
             else:
                 # Update existing agent status
@@ -515,174 +920,196 @@ async def receive_element_log(request: Dict[str, Any]):
                 if agent_name:
                     agent_status_cache[agent_id]["agent_name"] = agent_name
                 agent_status_cache[agent_id]["last_update"] = timestamp
-            
+
             # Add log entry
             agent_status_cache[agent_id]["logs"].append(log_entry)
             # Keep only last 10 logs
             if len(agent_status_cache[agent_id]["logs"]) > 10:
-                agent_status_cache[agent_id]["logs"] = agent_status_cache[agent_id]["logs"][-10:]
-        
+                agent_status_cache[agent_id]["logs"] = agent_status_cache[agent_id][
+                    "logs"
+                ][-10:]
+
         # Create update message
         update_message = {
             "type": "AGENT_STATUS_UPDATE",
             "payload": {
                 "agent_id": agent_id,
-                "agent_name": agent_name or (agent_status_cache.get(agent_id, {}).get("agent_name", "")),
+                "agent_name": agent_name
+                or (agent_status_cache.get(agent_id, {}).get("agent_name", "")),
                 "work_status": work_status,
                 "current_task": task_desc,
                 "log_type": log_type,
                 "element_id": element_id,
                 "timestamp": timestamp,
                 "log": log_entry,
-                "agent": agent_status_cache.get(agent_id, {}) if agent_id else None
-            }
+                "agent": agent_status_cache.get(agent_id, {}) if agent_id else None,
+            },
         }
-        
-        print(f"[Element Log] {element_id} | {log_type} | Agent: {agent_id[:30] if agent_id else 'N/A'}... | Status: {work_status}")
-        
+
+        print(
+            f"[Element Log] {element_id} | {log_type} | Agent: {agent_id[:30] if agent_id else 'N/A'}... | Status: {work_status}"
+        )
+
         # Broadcast to all connected WebSocket clients
         await manager.broadcast(update_message)
-        
+
         return {
             "status": "success",
             "message": "Element log received and agent status updated",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
     except Exception as e:
         print(f"[Element Log Error] {e}")
         import traceback
+
         traceback.print_exc()
         return {
             "status": "error",
             "message": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
+
 
 # WebSocket endpoint
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """WebSocket endpoint for real-time updates"""
     await manager.connect(websocket)
-    
+
     try:
         # Send initial data
         agents = get_agents_from_db()
-        await manager.send_to(websocket, {
-            "type": "AGENT_LIST",
-            "payload": {"agents": agents}
-        })
-        
+        await manager.send_to(
+            websocket, {"type": "AGENT_LIST", "payload": {"agents": agents}}
+        )
+
         while True:
             # Receive and handle messages from client
             data = await websocket.receive_text()
             try:
                 message = json.loads(data)
                 msg_type = message.get("type")
-                
+
                 if msg_type == "DISPATCH_TASK":
                     payload = message.get("payload", {})
                     print(f"[Task] Dispatched: {payload}")
-                    
+
                     # Broadcast to all clients
-                    await manager.broadcast({
-                        "type": "TASK_DISPATCHED",
-                        "payload": payload
-                    })
-                    
+                    await manager.broadcast(
+                        {"type": "TASK_DISPATCHED", "payload": payload}
+                    )
+
                 elif msg_type == "EMERGENCY_LAND":
                     print("[Emergency] Landing command received")
-                    await manager.broadcast({
-                        "type": "EMERGENCY_LAND",
-                        "payload": {"timestamp": datetime.utcnow().isoformat()}
-                    })
-                    
+                    await manager.broadcast(
+                        {
+                            "type": "EMERGENCY_LAND",
+                            "payload": {"timestamp": datetime.utcnow().isoformat()},
+                        }
+                    )
+
                 elif msg_type == "ABORT_ALL":
                     print("[Abort] All tasks command received")
-                    await manager.broadcast({
-                        "type": "ABORT_ALL",
-                        "payload": {"timestamp": datetime.utcnow().isoformat()}
-                    })
-                    
+                    await manager.broadcast(
+                        {
+                            "type": "ABORT_ALL",
+                            "payload": {"timestamp": datetime.utcnow().isoformat()},
+                        }
+                    )
+
                 elif msg_type == "PING":
-                    await manager.send_to(websocket, {
-                        "type": "PONG",
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
-                    
+                    await manager.send_to(
+                        websocket,
+                        {"type": "PONG", "timestamp": datetime.utcnow().isoformat()},
+                    )
+
                 elif msg_type == "REFRESH":
                     print("[Refresh] Clear environment request received")
-                    
+
                     # Call ARF /clear endpoint
                     result = await call_arf_clear()
-                    
+
                     if result.get("success"):
                         # Get fresh agent list after clear
                         agents = get_agents_from_db()
-                        
+
                         # Broadcast refresh completion to all clients
-                        await manager.broadcast({
-                            "type": "REFRESH_COMPLETE",
-                            "payload": {
-                                "timestamp": datetime.utcnow().isoformat(),
-                                "agents": agents,
-                                "arf_response": result.get("response")
+                        await manager.broadcast(
+                            {
+                                "type": "REFRESH_COMPLETE",
+                                "payload": {
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                    "agents": agents,
+                                    "arf_response": result.get("response"),
+                                },
                             }
-                        })
+                        )
                         print("[Refresh] Environment cleared and agent list refreshed")
                     else:
                         # Send error to requesting client
-                        await manager.send_to(websocket, {
-                            "type": "REFRESH_ERROR",
-                            "payload": {
-                                "timestamp": datetime.utcnow().isoformat(),
-                                "error": result.get("error", "Unknown error"),
-                                "detail": result.get("detail", "")
-                            }
-                        })
+                        await manager.send_to(
+                            websocket,
+                            {
+                                "type": "REFRESH_ERROR",
+                                "payload": {
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                    "error": result.get("error", "Unknown error"),
+                                    "detail": result.get("detail", ""),
+                                },
+                            },
+                        )
                         print(f"[Refresh Error] {result.get('error')}")
-                    
+
             except json.JSONDecodeError:
                 print("[WebSocket] Invalid JSON received")
-                
+
     except WebSocketDisconnect:
         manager.disconnect(websocket)
     except Exception as e:
         print(f"[WebSocket Error] {e}")
         manager.disconnect(websocket)
 
+
 # Background task to broadcast updates
 async def broadcast_agent_updates():
     """Periodically broadcast agent updates to all clients"""
     while True:
         await asyncio.sleep(5)  # Update every 5 seconds
-        
+
         if manager.active_connections:
             try:
                 agents = get_agents_from_db()
-                await manager.broadcast({
-                    "type": "AGENT_LIST",
-                    "payload": {"agents": agents}
-                })
+                await manager.broadcast(
+                    {"type": "AGENT_LIST", "payload": {"agents": agents}}
+                )
             except Exception as e:
                 print(f"[Broadcast Error] {e}")
+
 
 # Serve static files (React build)
 try:
     from starlette.staticfiles import StaticFiles as StarletteStaticFiles
     from starlette.responses import Response
-    
+
     class NoCacheStaticFiles(StarletteStaticFiles):
         """Custom StaticFiles that adds no-cache headers"""
+
         async def get_response(self, path: str, scope):
             response = await super().get_response(path, scope)
             # Add cache control headers to prevent caching
-            response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+            response.headers["Cache-Control"] = (
+                "no-cache, no-store, must-revalidate, max-age=0"
+            )
             response.headers["Pragma"] = "no-cache"
             response.headers["Expires"] = "0"
             return response
-    
-    app.mount("/static", NoCacheStaticFiles(directory="/root/lpx/webui/frontend/build/static"), name="static")
-    
+
+    app.mount(
+        "/static",
+        NoCacheStaticFiles(directory="/root/lpx/webui/frontend/build/static"),
+        name="static",
+    )
+
     @app.get("/")
     async def serve_react():
         """Serve React frontend with no-cache headers"""
@@ -691,11 +1118,11 @@ try:
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
-                "Expires": "0"
-            }
+                "Expires": "0",
+            },
         )
         return response
-    
+
     @app.get("/{path:path}")
     async def serve_react_routes(path: str):
         """Serve React frontend for all routes with no-cache headers"""
@@ -704,8 +1131,8 @@ try:
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
-                "Expires": "0"
-            }
+                "Expires": "0",
+            },
         )
         return response
 
@@ -715,7 +1142,7 @@ try:
         """Get all active video streams"""
         return {
             "streams": video_stream_manager.get_all_streams(),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     @app.get("/api/video/streams/{agent_id}")
@@ -725,7 +1152,7 @@ try:
         return {
             "agent_id": agent_id,
             "streams": [s.to_dict() for s in streams],
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     @app.post("/api/video/streams/{agent_id}/register")
@@ -741,7 +1168,7 @@ try:
             agent_name=agent_name,
             stream_type=stream_type,
             resolution=resolution,
-            fps=fps
+            fps=fps,
         )
 
         # Broadcast to all clients
@@ -750,7 +1177,7 @@ try:
         return {
             "status": "success",
             "stream": stream.to_dict(),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     @app.post("/api/video/webrtc/offer")
@@ -779,7 +1206,7 @@ try:
                 "status": "success",
                 "stream_id": stream_id,
                 "message": "Offer received, waiting for viewer to connect",
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.utcnow().isoformat(),
             }
 
         return {"status": "error", "message": "Stream not found"}
@@ -802,7 +1229,7 @@ try:
             "status": "success",
             "stream_id": stream_id,
             "message": "Viewer connected",
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
     @app.post("/api/video/webrtc/ice")
@@ -810,23 +1237,26 @@ try:
         """Handle ICE candidate exchange"""
         stream_id = request.get("stream_id")
         candidate = request.get("candidate")
-        is_agent = request.get("is_agent", True)  # True if from agent, False if from viewer
+        is_agent = request.get(
+            "is_agent", True
+        )  # True if from agent, False if from viewer
 
         if stream_id and candidate:
-            video_stream_manager.add_ice_candidate(stream_id, {
-                "candidate": candidate,
-                "is_agent": is_agent
-            })
+            video_stream_manager.add_ice_candidate(
+                stream_id, {"candidate": candidate, "is_agent": is_agent}
+            )
 
             # Broadcast ICE candidate to the other party
-            await manager.broadcast({
-                "type": "WEBRTC_ICE_CANDIDATE",
-                "payload": {
-                    "stream_id": stream_id,
-                    "candidate": candidate,
-                    "from_agent": is_agent
+            await manager.broadcast(
+                {
+                    "type": "WEBRTC_ICE_CANDIDATE",
+                    "payload": {
+                        "stream_id": stream_id,
+                        "candidate": candidate,
+                        "from_agent": is_agent,
+                    },
                 }
-            })
+            )
 
             return {"status": "success"}
 
@@ -841,7 +1271,7 @@ try:
         return {
             "status": "success",
             "stream_id": stream_id,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
 
 except Exception as e:
@@ -849,9 +1279,5 @@ except Exception as e:
 
 if __name__ == "__main__":
     uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=9005,
-        reload=False,
-        log_level="info"
+        "app.main:app", host="0.0.0.0", port=9005, reload=False, log_level="info"
     )

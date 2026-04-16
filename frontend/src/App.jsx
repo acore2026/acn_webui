@@ -8,16 +8,16 @@ import ControlPanel from './components/ControlPanel/ControlPanel';
 import TaskModal from './components/TaskModal/TaskModal';
 import DebugPanel from './components/DebugPanel/DebugPanel';
 import useWebSocket from './hooks/useWebSocket';
-import { mockAgents, mockMessages } from './utils/mockData';
 
 const App = () => {
-  const [agents, setAgents] = useState(mockAgents);
-  const [messages, setMessages] = useState(mockMessages);
+  const [agents, setAgents] = useState([]);
+  const [messages, setMessages] = useState([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [moqVideoStreams, setMoqVideoStreams] = useState([]);
   const [moqFrames, setMoqFrames] = useState({}); // track_id -> latest frame
   const [videoStreams, setVideoStreams] = useState([]);
   const [debugEnabled, setDebugEnabled] = useState(false); // Debug面板开关
+  const [isDarkTheme, setIsDarkTheme] = useState(false); // 主题切换，默认浅色
   
   // WebSocket connection - 使用相对路径自动适配当前host
   const wsUrl = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws`;
@@ -27,6 +27,20 @@ const App = () => {
   const toggleDebug = () => {
     setDebugEnabled(prev => !prev);
   };
+
+  // 切换主题
+  const toggleTheme = () => {
+    setIsDarkTheme(prev => !prev);
+  };
+
+  // 应用主题
+  useEffect(() => {
+    if (isDarkTheme) {
+      document.body.classList.add('dark-theme');
+    } else {
+      document.body.classList.remove('dark-theme');
+    }
+  }, [isDarkTheme]);
 
   // Handle incoming WebSocket messages
   useEffect(() => {
@@ -124,18 +138,63 @@ const App = () => {
               });
             }
             break;
+          case 'VIDEO_TRACKS_AVAILABLE':
+            // Handle new video tracks from ACF
+            if (data.payload?.tracks) {
+              const { agent_id, task_id, tracks } = data.payload;
+              console.log(`[VIDEO_TRACKS_AVAILABLE] Received ${tracks.length} tracks for ${agent_id}`);
+              
+              // Add message to flow
+              addMessage('ACF', 'Monitor', `Received ${tracks.length} video tracks for ${agent_id}`);
+              
+              // Update moqFrames to show the tracks
+              tracks.forEach(track => {
+                if (track.success) {
+                  setMoqFrames(prev => ({
+                    ...prev,
+                    [track.track_id]: {
+                      track_id: track.track_id,
+                      namespace: track.namespace,
+                      track_name: track.track_name,
+                      status: 'subscribed',
+                      mime_type: null,
+                      data_url: null,
+                      timestamp: new Date()
+                    }
+                  }));
+                }
+              });
+            }
+            break;
           case 'VIDEO_FRAME':
             // Handle MOQ video frame
             if (data.payload) {
-              const { track_id, group_id, object_id, frame_type, payload_size } = data.payload;
+              const {
+                track_id,
+                group_id,
+                object_id,
+                frame_type,
+                payload_size,
+                payload_base64,
+                mime_type,
+                codec,
+                data_url
+              } = data.payload;
               // Update latest frame for this track
               setMoqFrames(prev => ({
                 ...prev,
                 [track_id]: {
+                  track_id,
                   group_id,
                   object_id,
                   frame_type,
                   payload_size,
+                  payload_base64,  // <-- 添加这一行
+                  mime_type,
+                  codec,
+                  data_url,
+                  is_renderable: Boolean(mime_type && mime_type.startsWith('image/') && data_url),
+                  status: 'live',
                   timestamp: new Date()
                 }
               }));
@@ -213,7 +272,8 @@ const App = () => {
   };
 
   const handleRefresh = () => {
-    // Send refresh request to backend to call ARF /clear
+    setVideoStreams([]);
+    setMoqFrames({});
     sendMessage({
       type: 'REFRESH',
       payload: { timestamp: new Date().toISOString() }
@@ -227,7 +287,12 @@ const App = () => {
 
   return (
     <div className="app">
-      <TopBar onToggleDebug={toggleDebug} debugEnabled={debugEnabled} />
+      <TopBar 
+        onToggleDebug={toggleDebug} 
+        debugEnabled={debugEnabled}
+        onToggleTheme={toggleTheme}
+        isDarkTheme={isDarkTheme}
+      />
       
       {/* Debug Panel */}
       {debugEnabled && (

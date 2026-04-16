@@ -42,7 +42,7 @@
 .control-btn.primary:hover {
   background: var(--accent-blue);
   color: white;
-  box-shadow: var(--glow-blue);
+  box-shadow: 0 0 15px rgba(59, 130, 246, 0.3);
 }
 
 .control-btn.warning {
@@ -52,8 +52,8 @@
 
 .control-btn.warning:hover {
   background: var(--accent-yellow);
-  color: var(--bg-primary);
-  box-shadow: 0 0 20px rgba(255, 204, 0, 0.3);
+  color: white;
+  box-shadow: 0 0 15px rgba(245, 158, 11, 0.3);
 }
 
 .control-btn.danger {
@@ -64,7 +64,7 @@
 .control-btn.danger:hover {
   background: var(--accent-red);
   color: white;
-  box-shadow: var(--glow-red);
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.3);
 }
 
 .control-btn.secondary {
@@ -74,5 +74,5 @@
 
 .control-btn.secondary:hover {
   background: var(--text-secondary);
-  color: var(--bg-primary);
+  color: white;
 }

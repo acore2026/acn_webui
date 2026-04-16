@@ -23,18 +23,15 @@
 
 .status-dot.working {
   background: var(--accent-green);
-  box-shadow: 0 0 5px var(--accent-green);
 }
 
 .status-dot.tracking {
-  background: var(--accent-cyan);
-  box-shadow: 0 0 5px var(--accent-cyan);
+  background: var(--accent-blue);
   animation: blink 1s infinite;
 }
 
 .status-dot.expelling {
   background: var(--accent-red);
-  box-shadow: 0 0 5px var(--accent-red);
   animation: blink 0.5s infinite;
 }
 
@@ -56,6 +53,7 @@
   display: flex;
   flex-direction: column;
   min-height: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
 }
 
 .status-card::before {
@@ -73,17 +71,14 @@
 
 .status-card.working::before {
   background: var(--accent-green);
-  box-shadow: 0 0 10px var(--accent-green);
 }
 
 .status-card.tracking::before {
-  background: var(--accent-cyan);
-  box-shadow: 0 0 10px var(--accent-cyan);
+  background: var(--accent-blue);
 }
 
 .status-card.expelling::before {
   background: var(--accent-red);
-  box-shadow: 0 0 10px var(--accent-red);
 }
 
 .status-card-header {
@@ -96,6 +91,7 @@
 .status-card-agent {
   font-weight: bold;
   font-size: 13px;
+  color: var(--text-primary);
 }
 
 .status-card-state {
@@ -107,22 +103,22 @@
 }
 
 .status-card-state.idle {
-  background: rgba(90, 90, 122, 0.3);
+  background: rgba(156, 163, 175, 0.2);
   color: var(--text-muted);
 }
 
 .status-card-state.working {
-  background: rgba(0, 255, 136, 0.2);
+  background: rgba(16, 185, 129, 0.15);
   color: var(--accent-green);
 }
 
 .status-card-state.tracking {
-  background: rgba(0, 212, 255, 0.2);
-  color: var(--accent-cyan);
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent-blue);
 }
 
 .status-card-state.expelling {
-  background: rgba(255, 51, 102, 0.2);
+  background: rgba(239, 68, 68, 0.15);
   color: var(--accent-red);
 }
 
@@ -135,7 +131,7 @@
 .status-logs {
   margin-top: 10px;
   padding-top: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.1);
+  border-top: 1px solid var(--border-color);
   max-height: 100px;
   overflow-y: auto;
 }
@@ -143,7 +139,7 @@
 .logs-header {
   font-size: 11px;
   font-weight: bold;
-  color: var(--accent-cyan);
+  color: var(--accent-blue);
   margin-bottom: 5px;
   text-transform: uppercase;
   letter-spacing: 1px;
@@ -159,7 +155,7 @@
   display: flex;
   gap: 8px;
   padding: 3px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid var(--border-color);
 }
 
 .log-item:last-child {
@@ -177,17 +173,17 @@
 }
 
 .log-item.info .log-message {
-  color: #a0d0ff;
+  color: var(--accent-blue);
 }
 
 .log-item.success .log-message {
-  color: #70ffaa;
+  color: var(--accent-green);
 }
 
 .log-item.warning .log-message {
-  color: #ffd700;
+  color: var(--accent-yellow);
 }
 
 .log-item.error .log-message {
-  color: #ff6b6b;
+  color: var(--accent-red);
 }

@@ -1,8 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # ACN Agent Monitor - React + Python Full Stack
 # Start script
 
 cd /root/lpx/webui
+VENV_PYTHON="${VENV_PYTHON:-/root/lpx/acn_gw/venv/bin/python3}"
+VENV_PIP="${VENV_PIP:-/root/lpx/acn_gw/venv/bin/pip}"
 
 echo "=================================================="
 echo "  ACN Agent Monitor"
@@ -10,11 +12,7 @@ echo "  React Frontend + Python Backend"
 echo "=================================================="
 echo ""
 
-# Check if virtual environment is activated
-if [ -z "$VIRTUAL_ENV" ]; then
-    echo "Activating virtual environment..."
-    source /root/lpx/acn_gw/venv/bin/activate
-fi
+# Use the venv binaries directly so the script also works when run via sh/zsh.
 
 # Start Backend
 echo "Starting Backend Server..."
@@ -23,10 +21,10 @@ echo "  WebSocket: ws://0.0.0.0:9050/ws"
 echo ""
 
 cd backend
-pip install -q -r requirements.txt 2>/dev/null
+"$VENV_PIP" install -q -r requirements.txt 2>/dev/null
 
 # Start backend in background
-nohup python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9050 --reload > /tmp/webui_backend.log 2>&1 &
+nohup "$VENV_PYTHON" -m uvicorn app.main:app --host 0.0.0.0 --port 9050 --reload > /tmp/webui_backend.log 2>&1 &
 BACKEND_PID=$!
 echo "Backend PID: $BACKEND_PID"
 

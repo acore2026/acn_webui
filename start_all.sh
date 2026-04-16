@@ -1,8 +1,12 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
 # ACN Agent Monitor WebUI 一键启动脚本
 # 用法: ./start_all.sh [start|stop|restart|status]
 #
+
+if [ -z "${BASH_VERSION:-}" ]; then
+    exec bash "$0" "$@"
+fi
 
 set -e
 
@@ -14,8 +18,11 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # 配置
-BACKEND_PORT=9005
-LOG_DIR="/root/lpx/webui/logs"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BACKEND_DIR="$ROOT_DIR/backend"
+FRONTEND_DIR="$ROOT_DIR/frontend"
+BACKEND_PORT="${BACKEND_PORT:-9005}"
+LOG_DIR="$ROOT_DIR/logs"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_BUILD_LOG="$LOG_DIR/frontend_build.log"
 PID_FILE="$LOG_DIR/webui.pid"
@@ -23,23 +30,92 @@ PID_FILE="$LOG_DIR/webui.pid"
 # 创建日志目录
 mkdir -p "$LOG_DIR"
 
+echo_color() {
+    printf "%b\n" "$1"
+}
+
+find_backend_python() {
+    local candidate
+
+    if [ -n "${VENV_DIR:-}" ]; then
+        candidate="$VENV_DIR"
+        if [ -x "$candidate/bin/python3" ]; then
+            printf "%s\n" "$candidate/bin/python3"
+            return 0
+        fi
+        if [ -x "$candidate/bin/python" ]; then
+            printf "%s\n" "$candidate/bin/python"
+            return 0
+        fi
+        echo_color "${RED}  ✗ VENV_DIR 不可用: $VENV_DIR${NC}" >&2
+        return 1
+    fi
+
+    for candidate in "$ROOT_DIR/.venv" "$ROOT_DIR/venv" "/root/lpx/acn_gw/venv"; do
+        if [ -x "$candidate/bin/python3" ]; then
+            printf "%s\n" "$candidate/bin/python3"
+            return 0
+        fi
+        if [ -x "$candidate/bin/python" ]; then
+            printf "%s\n" "$candidate/bin/python"
+            return 0
+        fi
+    done
+
+    echo_color "${YELLOW}  未找到可用虚拟环境，创建 $ROOT_DIR/.venv ...${NC}" >&2
+    python3 -m venv "$ROOT_DIR/.venv"
+    printf "%s\n" "$ROOT_DIR/.venv/bin/python3"
+}
+
+ensure_backend_deps() {
+    local python_bin="$1"
+
+    if "$python_bin" - <<'PY' >/dev/null 2>&1
+import fastapi
+import httpx
+import pydantic
+import uvicorn
+import websockets
+import multipart
+PY
+    then
+        return 0
+    fi
+
+    echo_color "${YELLOW}  Python 依赖缺失，安装 backend/requirements.txt ...${NC}"
+    "$python_bin" -m pip install -r "$BACKEND_DIR/requirements.txt"
+}
+
+is_port_open() {
+    python3 - "$BACKEND_PORT" <<'PY' >/dev/null 2>&1
+import socket
+import sys
+
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1):
+    pass
+PY
+}
+
 # 启动后端
 start_backend() {
-    echo -e "${BLUE}[1/3] 启动后端服务...${NC}"
+    echo_color "${BLUE}[2/2] 启动后端服务...${NC}"
     
     # 检查是否已运行
     if pgrep -f "uvicorn.*app.main:app.*$BACKEND_PORT" > /dev/null; then
-        echo -e "${YELLOW}  后端服务已在运行${NC}"
+        echo_color "${YELLOW}  后端服务已在运行${NC}"
         return 0
     fi
     
-    cd /root/lpx/webui/backend
-    source /root/lpx/acn_gw/venv/bin/activate
+    cd "$BACKEND_DIR"
+    
+    # 使用 venv 的 python 直接启动，不依赖 source activate。
+    VENV_PYTHON="$(find_backend_python)"
+    ensure_backend_deps "$VENV_PYTHON"
     
     # 启动后端（使用 setsid 确保脱离终端）
-    setsid python3 -m uvicorn app.main:app \
+    setsid "$VENV_PYTHON" -m uvicorn app.main:app \
         --host 0.0.0.0 \
-        --port $BACKEND_PORT \
+        --port "$BACKEND_PORT" \
         --log-level info \
         > "$BACKEND_LOG" 2>&1 &
     
@@ -48,94 +124,112 @@ start_backend() {
     # 等待服务启动
     for i in {1..10}; do
         sleep 1
-        if curl -s http://localhost:$BACKEND_PORT/api/health > /dev/null 2>&1; then
-            echo -e "${GREEN}  ✓ 后端服务已启动 (PID: $BACKEND_PID)${NC}"
-            echo -e "${GREEN}  ✓ API: http://localhost:$BACKEND_PORT${NC}"
-            echo -e "${GREEN}  ✓ WebSocket: ws://localhost:$BACKEND_PORT/ws${NC}"
+        if curl -fsS "http://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+            echo_color "${GREEN}  ✓ 后端服务已启动 (PID: $BACKEND_PID)${NC}"
+            echo_color "${GREEN}  ✓ API: http://localhost:$BACKEND_PORT${NC}"
+            echo_color "${GREEN}  ✓ WebSocket: ws://localhost:$BACKEND_PORT/ws${NC}"
             echo $BACKEND_PID >> "$PID_FILE"
             return 0
         fi
     done
     
-    echo -e "${RED}  ✗ 后端服务启动失败${NC}"
+    echo_color "${RED}  ✗ 后端服务启动失败${NC}"
+    echo_color "${RED}  查看日志: $BACKEND_LOG${NC}"
     return 1
 }
 
 # 构建前端
 build_frontend() {
-    echo -e "${BLUE}[2/3] 构建前端...${NC}"
+    echo_color "${BLUE}[1/2] 构建前端...${NC}"
     
-    cd /root/lpx/webui/frontend
+    cd "$FRONTEND_DIR"
+
+    if [ ! -d node_modules ]; then
+        echo_color "${YELLOW}  node_modules 不存在，请先执行: cd $FRONTEND_DIR && npm install${NC}"
+        return 1
+    fi
     
     # 构建前端
     if npm run build > "$FRONTEND_BUILD_LOG" 2>&1; then
-        echo -e "${GREEN}  ✓ 前端构建完成${NC}"
+        echo_color "${GREEN}  ✓ 前端构建完成${NC}"
         return 0
     else
-        echo -e "${RED}  ✗ 前端构建失败${NC}"
-        echo -e "${RED}  查看日志: $FRONTEND_BUILD_LOG${NC}"
+        echo_color "${RED}  ✗ 前端构建失败${NC}"
+        echo_color "${RED}  查看日志: $FRONTEND_BUILD_LOG${NC}"
         return 1
     fi
 }
 
 # 检查服务状态
 check_status() {
-    echo -e "${BLUE}服务状态检查:${NC}"
+    echo_color "${BLUE}服务状态检查:${NC}"
+    local venv_python
     
     # 检查后端
     if pgrep -f "uvicorn.*app.main:app.*$BACKEND_PORT" > /dev/null; then
-        echo -e "${GREEN}  ✓ 后端服务: 运行中${NC}"
-        if curl -s http://localhost:$BACKEND_PORT/api/health > /dev/null 2>&1; then
-            echo -e "${GREEN}    - API 正常${NC}"
+        echo_color "${GREEN}  ✓ 后端服务: 运行中${NC}"
+        if curl -fsS "http://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+            echo_color "${GREEN}    - API 正常${NC}"
         else
-            echo -e "${RED}    - API 无响应${NC}"
+            echo_color "${RED}    - API 无响应${NC}"
         fi
     else
-        echo -e "${RED}  ✗ 后端服务: 未运行${NC}"
+        echo_color "${RED}  ✗ 后端服务: 未运行${NC}"
     fi
     
     # 检查端口
-    if ss -tlnp | grep -q ":$BACKEND_PORT"; then
-        echo -e "${GREEN}  ✓ 端口 $BACKEND_PORT: 监听中${NC}"
+    if is_port_open; then
+        echo_color "${GREEN}  ✓ 端口 $BACKEND_PORT: 监听中${NC}"
     else
-        echo -e "${RED}  ✗ 端口 $BACKEND_PORT: 未监听${NC}"
+        echo_color "${RED}  ✗ 端口 $BACKEND_PORT: 未监听${NC}"
     fi
     
     # 显示日志位置
     echo ""
-    echo -e "${BLUE}日志文件位置:${NC}"
+    echo_color "${BLUE}Python 虚拟环境:${NC}"
+    if venv_python="$(find_backend_python 2>/dev/null)"; then
+        echo "  Python: $venv_python"
+    else
+        echo_color "${RED}  ✗ 未找到可用 Python 虚拟环境${NC}"
+    fi
+    echo ""
+    echo_color "${BLUE}日志文件位置:${NC}"
     echo "  后端日志: $BACKEND_LOG"
     echo "  前端构建日志: $FRONTEND_BUILD_LOG"
 }
 
 # 停止服务
 stop_services() {
-    echo -e "${BLUE}停止服务...${NC}"
+    echo_color "${BLUE}停止服务...${NC}"
     
     # 停止后端
     BACKEND_PIDS=$(pgrep -f "uvicorn.*app.main:app.*$BACKEND_PORT" || true)
     if [ -n "$BACKEND_PIDS" ]; then
         echo "  停止后端服务 (PIDs: $BACKEND_PIDS)"
-        kill -9 $BACKEND_PIDS 2>/dev/null || true
+        kill $BACKEND_PIDS 2>/dev/null || true
         sleep 1
+        BACKEND_PIDS=$(pgrep -f "uvicorn.*app.main:app.*$BACKEND_PORT" || true)
+        if [ -n "$BACKEND_PIDS" ]; then
+            kill -9 $BACKEND_PIDS 2>/dev/null || true
+        fi
     fi
     
     # 清理 PID 文件
     rm -f "$PID_FILE"
     
-    echo -e "${GREEN}  ✓ 所有服务已停止${NC}"
+    echo_color "${GREEN}  ✓ 所有服务已停止${NC}"
 }
 
 # 实时查看日志
 tail_logs() {
-    echo -e "${BLUE}查看日志 (按 Ctrl+C 退出)...${NC}"
+    echo_color "${BLUE}查看日志 (按 Ctrl+C 退出)...${NC}"
     echo ""
     
     if [ -f "$BACKEND_LOG" ]; then
-        echo -e "${GREEN}=== 后端日志 ===${NC}"
-        tail -50 "$BACKEND_LOG"
+        echo_color "${GREEN}=== 后端日志 ===${NC}"
+        tail -f "$BACKEND_LOG"
     else
-        echo -e "${RED}后端日志不存在${NC}"
+        echo_color "${RED}后端日志不存在${NC}"
     fi
 }
 
@@ -153,11 +247,12 @@ case "${1:-start}" in
         if build_frontend && start_backend; then
             echo ""
             echo "========================================"
-            echo -e "${GREEN}  所有服务启动成功!${NC}"
+            echo_color "${GREEN}  所有服务启动成功!${NC}"
             echo "========================================"
             echo ""
             echo "访问地址:"
             echo "  http://<服务器IP>:$BACKEND_PORT"
+            echo "  http://localhost:$BACKEND_PORT"
             echo ""
             echo "查看日志:"
             echo "  tail -f $BACKEND_LOG"
@@ -170,7 +265,7 @@ case "${1:-start}" in
         else
             echo ""
             echo "========================================"
-            echo -e "${RED}  服务启动失败!${NC}"
+            echo_color "${RED}  服务启动失败!${NC}"
             echo "========================================"
             exit 1
         fi
