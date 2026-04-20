@@ -118,6 +118,48 @@
   font-size: 13px;
   color: var(--text-secondary);
   font-family: 'JetBrains Mono', monospace;
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.agent-meta-label {
+  flex-shrink: 0;
+}
+
+.agent-meta-value {
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+  cursor: pointer;
+}
+
+.agent-meta-value:hover {
+  scrollbar-color: var(--accent-blue) transparent;
+}
+
+.agent-meta-value::-webkit-scrollbar {
+  height: 6px;
+}
+
+.agent-meta-value::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.agent-meta-value::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 3px;
+}
+
+.agent-meta-value:hover::-webkit-scrollbar-thumb {
+  background: var(--accent-blue);
+}
+
+.agent-meta-value::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-cyan);
 }
 
 .agent-capabilities {

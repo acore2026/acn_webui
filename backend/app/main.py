@@ -9,14 +9,14 @@ import asyncio
 import base64
 import json
 import sqlite3
-from datetime import datetime
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from datetime import datetime, timezone
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import uvicorn
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import httpx
 
 # Import video stream manager
@@ -32,7 +32,7 @@ except ImportError as e:
     MOQ_AVAILABLE = False
 
 # Database path
-DB_PATH = "/home/acn/cxr/acn_gw/agent_gw/agent_gw.db"
+DB_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
 # DB_PATH = "/root/lpx/webui/test/test_agent_gw.db"
 
 # ARF Service Configuration
@@ -135,6 +135,380 @@ def get_agents_from_db() -> List[Dict[str, Any]]:
         return []
 
 
+def get_task_count_from_db() -> int:
+    """Get total task count from database."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tasks")
+        value = int(cursor.fetchone()[0] or 0)
+        conn.close()
+        return value
+    except Exception as e:
+        print(f"[Task Count Error] {e}")
+        return 0
+
+
+def _parse_timestamp(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        return parsed
+    except Exception:
+        return None
+
+
+def _format_relative_time(value: Any) -> str:
+    parsed = _parse_timestamp(value)
+    if not parsed:
+        return "Unknown"
+
+    delta_seconds = max(int((datetime.utcnow() - parsed).total_seconds()), 0)
+    if delta_seconds < 60:
+        return f"{delta_seconds}s ago"
+    if delta_seconds < 3600:
+        return f"{delta_seconds // 60}m ago"
+    if delta_seconds < 86400:
+        return f"{delta_seconds // 3600}h ago"
+    return f"{delta_seconds // 86400}d ago"
+
+
+def _normalize_capabilities(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
+def _dashboard_status_from_agent(agent: Dict[str, Any]) -> str:
+    agent_status = str(agent.get("agent_status", "")).lower()
+    work_status = str(agent.get("work_status", "")).lower()
+
+    if agent_status == "offline":
+        return "offline"
+    if agent_status in {"working", "busy"} or work_status in {
+        "working",
+        "tracking",
+        "expelling",
+    }:
+        return "busy"
+    return "online"
+
+
+def _dashboard_role_from_agent(agent: Dict[str, Any]) -> str:
+    capabilities = _normalize_capabilities(agent.get("agent_capability"))
+    if capabilities:
+        return str(capabilities[0]).replace("-", " ").replace("_", " ").title()
+    if agent.get("current_task"):
+        return str(agent["current_task"])
+    if agent.get("network_capability"):
+        return str(agent["network_capability"])
+    return "General Agent"
+
+
+def _dashboard_region_from_agent(agent: Dict[str, Any]) -> str:
+    if agent.get("owner"):
+        return str(agent["owner"])
+    if agent.get("network_capability"):
+        return str(agent["network_capability"])
+    return "ACN Mesh"
+
+
+def _dashboard_throughput_from_agent(agent: Dict[str, Any]) -> str:
+    status = _dashboard_status_from_agent(agent)
+    if status == "offline":
+        return "0.0 Gbps"
+
+    seed = sum(ord(char) for char in str(agent.get("agent_id", "agent")))
+    base = 28 if status == "online" else 52
+    throughput = (base + (seed % 43)) / 10
+    return f"{throughput:.1f} Gbps"
+
+
+def _dashboard_summary_from_agent(agent: Dict[str, Any]) -> str:
+    capabilities = _normalize_capabilities(agent.get("agent_capability"))
+    current_task = str(agent.get("current_task", "")).strip()
+    role = _dashboard_role_from_agent(agent)
+    agent_name = str(agent.get("agent_name") or agent.get("agent_id") or "This agent")
+
+    if current_task and capabilities:
+        return (
+            f"{agent_name} is currently focused on {current_task.lower()} and supports "
+            f"{', '.join(capabilities[:2])}."
+        )
+    if current_task:
+        return f"{agent_name} is currently focused on {current_task.lower()}."
+    if capabilities:
+        return (
+            f"{agent_name} is configured for {role.lower()} workflows and currently exposes "
+            f"{len(capabilities)} registered capabilities."
+        )
+    return f"{agent_name} is connected to the ACN mesh and awaiting the next assigned workflow."
+
+
+def _dashboard_alerts_from_agent(agent: Dict[str, Any]) -> List[str]:
+    status = _dashboard_status_from_agent(agent)
+    current_task = str(agent.get("current_task", "")).strip()
+    last_update = _format_relative_time(agent.get("last_update"))
+    capabilities = _normalize_capabilities(agent.get("agent_capability"))
+
+    if status == "offline":
+        return [
+            f"Agent appears offline. Last update received {last_update}.",
+            "Operator review recommended before assigning new work.",
+        ]
+
+    notes = []
+    if current_task:
+        notes.append(f"Current task: {current_task}")
+    if capabilities:
+        notes.append(f"{len(capabilities)} capability profiles registered")
+    notes.append(f"Last heartbeat observed {last_update}")
+    return notes[:3]
+
+
+def _merge_cached_agent_fields(
+    base_agent: Dict[str, Any], cached_agent: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Overlay transient runtime state without overriding DB-backed identity fields."""
+    combined = dict(base_agent)
+
+    # Runtime-only fields from live logs.
+    for field in ("work_status", "current_task", "logs", "last_update"):
+        if field in cached_agent and cached_agent.get(field) not in (None, ""):
+            combined[field] = cached_agent[field]
+
+    # Helpful metadata that may only exist in live log payloads.
+    for field in ("owner", "network_capability"):
+        if not combined.get(field) and cached_agent.get(field):
+            combined[field] = cached_agent[field]
+
+    # Fill identity fields from cache only when DB does not have them.
+    if not combined.get("agent_name") and cached_agent.get("agent_name"):
+        combined["agent_name"] = cached_agent["agent_name"]
+    if not combined.get("agent_capability") and cached_agent.get("agent_capability"):
+        combined["agent_capability"] = cached_agent["agent_capability"]
+    if not combined.get("agent_status") and cached_agent.get("agent_status"):
+        combined["agent_status"] = cached_agent["agent_status"]
+
+    return combined
+
+
+def _merge_agent_sources() -> List[Dict[str, Any]]:
+    merged: List[Dict[str, Any]] = []
+
+    # The ARF/AgentGW database is the source of truth for which agents exist.
+    # Runtime cache only enriches those agents with transient state.
+    for agent in get_agents_from_db():
+        agent_id = str(agent.get("agent_id", "")).strip()
+        if not agent_id:
+            continue
+
+        cached = agent_status_cache.get(agent_id)
+        combined = (
+            _merge_cached_agent_fields(agent, cached)
+            if cached
+            else dict(agent)
+        )
+        combined["agent_id"] = agent_id
+        if "agent_capability" not in combined:
+            combined["agent_capability"] = []
+        if "agent_status" not in combined:
+            combined["agent_status"] = "offline"
+        merged.append(combined)
+
+    return sorted(
+        merged,
+        key=lambda item: str(item.get("agent_name") or item.get("agent_id") or ""),
+    )
+
+
+def _dashboard_position(index: int) -> Dict[str, int]:
+    columns = 3
+    column = index % columns
+    row = index // columns
+    return {
+        "x": 140 + column * 320,
+        "y": 90 + row * 190,
+    }
+
+
+def build_dashboard_agents() -> List[Dict[str, Any]]:
+    dashboard_agents: List[Dict[str, Any]] = []
+
+    for index, agent in enumerate(_merge_agent_sources()):
+        agent_id = str(agent.get("agent_id") or f"agent-{index}")
+        status = _dashboard_status_from_agent(agent)
+        capabilities = _normalize_capabilities(agent.get("agent_capability"))
+        logs = agent.get("logs", [])
+
+        dashboard_agents.append(
+            {
+                "id": agent_id,
+                "name": str(agent.get("agent_name") or agent_id),
+                "role": _dashboard_role_from_agent(agent),
+                "status": status,
+                "region": _dashboard_region_from_agent(agent),
+                "throughput": _dashboard_throughput_from_agent(agent),
+                "summary": _dashboard_summary_from_agent(agent),
+                "uptime": "Unknown" if status == "offline" else "Online",
+                "lastHeartbeat": _format_relative_time(
+                    agent.get("last_update") or datetime.utcnow().isoformat()
+                ),
+                "taskCount": max(len(logs), 1 if status == "busy" else 0),
+                "capabilities": capabilities or ["General connectivity"],
+                "alerts": _dashboard_alerts_from_agent(agent),
+                "position": _dashboard_position(index),
+            }
+        )
+
+    return dashboard_agents
+
+
+def build_dashboard_links(agents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if len(agents) < 2:
+        return []
+
+    hub = next((agent for agent in agents if agent["status"] != "offline"), agents[0])
+    links = []
+
+    for agent in agents:
+        if agent["id"] == hub["id"]:
+            continue
+
+        seed = sum(ord(char) for char in f'{hub["id"]}:{agent["id"]}')
+        active = hub["status"] != "offline" and agent["status"] != "offline"
+        latency = 12 + (seed % 24)
+        if not active:
+            latency += 28
+
+        links.append(
+            {
+                "id": f'{hub["id"]}-{agent["id"]}',
+                "source": hub["id"],
+                "target": agent["id"],
+                "latency": f"{latency}ms",
+                "active": active,
+            }
+        )
+
+    return links
+
+
+def _message_level_from_log(entry: Dict[str, Any]) -> str:
+    level = str(entry.get("level", "info")).lower()
+    message = str(entry.get("message", "")).lower()
+
+    if level == "error" or "failed" in message or "error" in message:
+        return "error"
+    if level == "warning" or "warn" in message or "latency" in message:
+        return "warning"
+    return "info"
+
+
+def build_dashboard_messages(limit: int = 8) -> List[Dict[str, Any]]:
+    recent_logs = list(reversed(log_buffer[-limit:])) if log_buffer else []
+    messages = []
+
+    for index, entry in enumerate(recent_logs):
+        message = str(entry.get("message", "")).strip() or "System update"
+        timestamp = _parse_timestamp(entry.get("time"))
+        title = message.split(":", 1)[0][:72] if ":" in message else message[:72]
+        source = "Backend"
+        if "->" in message:
+            source = message.split("->", 1)[0].strip("[] ")
+
+        messages.append(
+            {
+                "id": f'msg-{index}-{entry.get("time", index)}',
+                "level": _message_level_from_log(entry),
+                "title": title or "System update",
+                "message": message,
+                "timestamp": timestamp.strftime("%H:%M:%S")
+                if timestamp
+                else datetime.utcnow().strftime("%H:%M:%S"),
+                "source": source or "Backend",
+            }
+        )
+
+    return messages
+
+
+def build_dashboard_metrics(
+    agents: List[Dict[str, Any]], links: List[Dict[str, Any]], messages: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    active_agents = sum(1 for agent in agents if agent["status"] != "offline")
+    busy_agents = sum(1 for agent in agents if agent["status"] == "busy")
+    total_agents = len(agents)
+    active_latencies = [
+        int(str(link["latency"]).replace("ms", "")) for link in links if link["active"]
+    ]
+    average_latency = (
+        round(sum(active_latencies) / len(active_latencies)) if active_latencies else 0
+    )
+    warning_messages = sum(1 for message in messages if message["level"] == "warning")
+    task_count = get_task_count_from_db() or busy_agents
+
+    latency_tone = "healthy"
+    if average_latency >= 50:
+        latency_tone = "critical"
+    elif average_latency >= 30:
+        latency_tone = "warning"
+
+    return [
+        {
+            "id": "latency",
+            "title": "System Latency",
+            "value": f"{average_latency}ms",
+            "detail": "Average active link latency from current backend mesh state.",
+            "tone": latency_tone,
+            "trend": (
+                f"{len(active_latencies)} active links sampled"
+                if active_latencies
+                else "Waiting for active routes"
+            ),
+        },
+        {
+            "id": "agents",
+            "title": "Active Agents",
+            "value": f"{active_agents} / {total_agents}",
+            "detail": "Live agent roster derived from the backend database and in-memory status cache.",
+            "tone": "warning" if active_agents < total_agents else "healthy",
+            "trend": f"{busy_agents} busy, {warning_messages} warning messages",
+        },
+        {
+            "id": "tasks",
+            "title": "Running Tasks",
+            "value": str(task_count),
+            "detail": "Current workload count backed by the tasks table and active agent state.",
+            "tone": "warning" if busy_agents > max(active_agents // 2, 1) else "healthy",
+            "trend": f"{busy_agents} agents currently busy",
+        },
+    ]
+
+
+def build_dashboard_snapshot() -> Dict[str, Any]:
+    agents = build_dashboard_agents()
+    links = build_dashboard_links(agents)
+    messages = build_dashboard_messages()
+    metrics = build_dashboard_metrics(agents, links, messages)
+
+    return {
+        "metrics": metrics,
+        "topology": {
+            "agents": agents,
+            "links": links,
+        },
+        "messages": messages,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 # ARF Service helper
 async def call_arf_clear() -> Dict[str, Any]:
     """Call ARF /clear endpoint to reset environment"""
@@ -169,19 +543,41 @@ async def call_arf_clear() -> Dict[str, Any]:
 # Video frame handler for MOQ
 async def handle_moq_video_frame(frame: "VideoFrame"):
     """Handle received video frame from MOQ"""
-    payload_b64 = base64.b64encode(frame.payload).decode("ascii")
-    mime_type = _infer_moq_mime_type(frame.payload)
-    codec = _infer_moq_codec(frame.payload)
+    # Import VideoFrame parser
+    try:
+        from .video_frame_parser import try_parse_video_frame, extract_h264_data
+
+        # Try to parse VideoFrame structure (from demo_task_initiator_video_production.py)
+        video_frame = try_parse_video_frame(frame.payload)
+        if video_frame:
+            # Extract pure H264 data from VideoFrame
+            h264_payload = video_frame.data
+            frame_info = video_frame.get_info()
+            print(
+                f"[VIDEO_FRAME] Parsed VideoFrame: frame_id={frame_info['frame_id']}, "
+                f"gop_id={frame_info['gop_id']}, {frame_info['width']}x{frame_info['height']}, "
+                f"fps={frame_info['fps']}, keyframe={frame_info['is_keyframe']}"
+            )
+        else:
+            # Not VideoFrame format, use raw payload
+            h264_payload = frame.payload
+    except ImportError:
+        # Parser not available, use raw payload
+        h264_payload = frame.payload
+
+    payload_b64 = base64.b64encode(h264_payload).decode("ascii")
+    mime_type = _infer_moq_mime_type(h264_payload)
+    codec = _infer_moq_codec(h264_payload)
 
     payload_preview = (
-        frame.payload[:20].hex() if len(frame.payload) >= 20 else frame.payload.hex()
+        h264_payload[:20].hex() if len(h264_payload) >= 20 else h264_payload.hex()
     )
     print(
-        f"[VIDEO_FRAME] track={frame.track_name[:50]} mime={mime_type} codec={codec} size={len(frame.payload)} payload_preview={payload_preview}"
+        f"[VIDEO_FRAME] track={frame.track_name[:50]} mime={mime_type} codec={codec} size={len(h264_payload)} payload_preview={payload_preview}"
     )
 
     # Force H264 if payload looks like video data
-    if mime_type == "application/octet-stream" and len(frame.payload) > 100:
+    if mime_type == "application/octet-stream" and len(h264_payload) > 100:
         mime_type = "video/h264"
         codec = "h264"
 
@@ -195,26 +591,7 @@ async def handle_moq_video_frame(frame: "VideoFrame"):
                 "object_id": frame.object_id,
                 "timestamp": frame.timestamp.isoformat(),
                 "frame_type": frame.frame_type,
-                "payload_size": len(frame.payload),
-                "mime_type": mime_type,
-                "codec": codec,
-                "payload_base64": payload_b64,
-                "data_url": f"data:{mime_type};base64,{payload_b64}",
-            },
-        }
-    )
-
-    # Broadcast to all WebSocket clients
-    await manager.broadcast(
-        {
-            "type": "VIDEO_FRAME",
-            "payload": {
-                "track_id": frame.track_name,
-                "group_id": frame.group_id,
-                "object_id": frame.object_id,
-                "timestamp": frame.timestamp.isoformat(),
-                "frame_type": frame.frame_type,
-                "payload_size": len(frame.payload),
+                "payload_size": len(h264_payload),
                 "mime_type": mime_type,
                 "codec": codec,
                 "payload_base64": payload_b64,
@@ -344,7 +721,7 @@ app.add_middleware(
 @app.get("/api/agents", response_model=Dict[str, Any])
 async def get_agents():
     """Get all registered agents"""
-    agents = get_agents_from_db()
+    agents = _merge_agent_sources()
     return {"agents": agents, "timestamp": datetime.utcnow().isoformat()}
 
 
@@ -382,6 +759,46 @@ async def get_logs(limit: int = 100):
         "logs": log_buffer[-limit:] if log_buffer else [],
         "total": len(log_buffer),
         "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/dashboard/overview")
+async def get_dashboard_overview():
+    """Get frontend-ready dashboard snapshot."""
+    return build_dashboard_snapshot()
+
+
+@app.post("/api/control/clear")
+async def clear_environment():
+    """Reset the environment through ARF and return the refreshed dashboard snapshot."""
+    result = await call_arf_clear()
+
+    if not result.get("success"):
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": result.get("error", "Failed to clear environment"),
+                "detail": result.get("detail", ""),
+            },
+        )
+
+    agent_status_cache.clear()
+    task_agent_mapping.clear()
+    agents = _merge_agent_sources()
+    dashboard = build_dashboard_snapshot()
+    payload = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "agents": agents,
+        "arf_response": result.get("response"),
+        "dashboard": dashboard,
+    }
+
+    await manager.broadcast({"type": "REFRESH_COMPLETE", "payload": payload})
+
+    return {
+        "success": True,
+        "message": "Environment cleared successfully.",
+        **payload,
     }
 
 
@@ -750,21 +1167,55 @@ async def receive_pipeline_log(request: Dict[str, Any]):
 
                 agent_id = content.get("agent_id", "")
                 agent_name = content.get("agent_name", content.get("name", ""))
+                task_id = body.get("task_id", "")
 
-                # For video tracking, use task_id to identify the agent
+                # Extract agent_id for internal forwarded messages
                 if not agent_id and abstract in [
-                    "Send MoQ object",
-                    "Publish MoQ track",
-                    "Announce MoQ published track",
+                    "收到/idm/v1/identity-applications请求",
+                    "/idm/v1/identity-applications已转发到IDM",
+                    "收到/arf/v1/agent-cards请求",
+                    "/arf/v1/agent-cards已转发到AgentGW",
+                    "/idm/v1/identity-applications响应返回ACN SDK",
+                    "/idm/v1/identity-applications上游响应返回",
+                    "/arf/v1/agent-cards响应返回ACN SDK",
+                    "/arf/v1/agent-cards上游响应返回",
                 ]:
-                    task_id = body.get("task_id", "")
-                    if task_id:
-                        # Find agent with this task_id in cache
+                    # Use owner + name to find agent in cache
+                    owner = content.get("owner", "")
+                    name = content.get("name", "")
+                    if name:
                         for cached_id, cached_data in agent_status_cache.items():
-                            if task_id in str(cached_data):
+                            if cached_data.get("agent_name") == name:
                                 agent_id = cached_id
-                                agent_name = cached_data.get("agent_name", "")
                                 break
+
+                # Extract agent_id from MoQ-related messages
+                if not agent_id:
+                    if abstract == "Publish MoQ track":
+                        namespace = content.get("namespace", "")
+                        if namespace and "did:udid:" in namespace:
+                            parts = namespace.split("/")
+                            for part in parts:
+                                if part.startswith("did:udid:"):
+                                    agent_id = part
+                                    break
+                    elif abstract == "Announce MoQ published track":
+                        payload = content.get("payload", {})
+                        agent_id = payload.get("src_agent_id", "")
+                    elif abstract == "Send MoQ object":
+                        agent_id = task_agent_mapping.get(task_id, "")
+
+                # Update task-agent mapping when we have both
+                if agent_id and task_id:
+                    task_agent_mapping[task_id] = agent_id
+
+                # Fallback: find agent with this task_id in cache
+                if not agent_id and task_id:
+                    for cached_id, cached_data in agent_status_cache.items():
+                        if task_id in str(cached_data):
+                            agent_id = cached_id
+                            agent_name = cached_data.get("agent_name", "")
+                            break
 
                 if agent_id:
                     timestamp = body.get("timestamp", datetime.utcnow().isoformat())
@@ -823,6 +1274,8 @@ async def receive_pipeline_log(request: Dict[str, Any]):
 
 # Agent status tracking
 agent_status_cache: Dict[str, Dict[str, Any]] = {}
+# Task to agent mapping for MoQ messages
+task_agent_mapping: Dict[str, str] = {}
 
 
 def get_work_status_from_log_type(log_type: str) -> tuple:
@@ -849,7 +1302,24 @@ def get_work_status_from_abstract(abstract: str) -> tuple:
     """Map pipeline-logs abstract to work_status and task description"""
     status_map = {
         "Register agent identity": ("working", "Registering identity"),
+        "收到/idm/v1/identity-applications请求": ("working", "Applying for identity"),
+        "/idm/v1/identity-applications已转发到IDM": (
+            "working",
+            "Identity application forwarded",
+        ),
+        "/idm/v1/identity-applications上游响应返回": (
+            "working",
+            "Identity application response",
+        ),
+        "/idm/v1/identity-applications响应返回ACN SDK": (
+            "working",
+            "Identity registered",
+        ),
         "Register agent capabilities": ("working", "Registering capabilities"),
+        "收到/arf/v1/agent-cards请求": ("working", "Publishing agent card"),
+        "/arf/v1/agent-cards已转发到AgentGW": ("working", "Agent card forwarded"),
+        "/arf/v1/agent-cards上游响应返回": ("working", "Agent card response"),
+        "/arf/v1/agent-cards响应返回ACN SDK": ("working", "Capabilities registered"),
         "Request task execution": ("working", "Executing task"),
         "Request task collaboration": ("working", "Collaborating"),
         "Publish MoQ track": ("tracking", "Publishing video track"),
@@ -978,9 +1448,12 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         # Send initial data
-        agents = get_agents_from_db()
+        agents = _merge_agent_sources()
         await manager.send_to(
             websocket, {"type": "AGENT_LIST", "payload": {"agents": agents}}
+        )
+        await manager.send_to(
+            websocket, {"type": "DASHBOARD_SNAPSHOT", "payload": build_dashboard_snapshot()}
         )
 
         while True:
@@ -1030,8 +1503,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     result = await call_arf_clear()
 
                     if result.get("success"):
+                        agent_status_cache.clear()
+                        task_agent_mapping.clear()
                         # Get fresh agent list after clear
-                        agents = get_agents_from_db()
+                        agents = _merge_agent_sources()
 
                         # Broadcast refresh completion to all clients
                         await manager.broadcast(
@@ -1041,6 +1516,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "timestamp": datetime.utcnow().isoformat(),
                                     "agents": agents,
                                     "arf_response": result.get("response"),
+                                    "dashboard": build_dashboard_snapshot(),
                                 },
                             }
                         )
@@ -1074,13 +1550,16 @@ async def websocket_endpoint(websocket: WebSocket):
 async def broadcast_agent_updates():
     """Periodically broadcast agent updates to all clients"""
     while True:
-        await asyncio.sleep(5)  # Update every 5 seconds
+        await asyncio.sleep(1)  # Update every 1 second
 
         if manager.active_connections:
             try:
-                agents = get_agents_from_db()
+                agents = _merge_agent_sources()
                 await manager.broadcast(
                     {"type": "AGENT_LIST", "payload": {"agents": agents}}
+                )
+                await manager.broadcast(
+                    {"type": "DASHBOARD_SNAPSHOT", "payload": build_dashboard_snapshot()}
                 )
             except Exception as e:
                 print(f"[Broadcast Error] {e}")

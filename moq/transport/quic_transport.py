@@ -246,6 +246,20 @@ class QUICClient:
         self.protocol.transmit()
         logger.debug(f"Sent datagram: {len(data)} bytes")
 
+    async def send_ping(self):
+        """Send QUIC PING frame to keep connection alive."""
+        if not self.protocol:
+            raise RuntimeError("Not connected")
+
+        # Send QUIC PING frame - this is explicitly treated as connection activity
+        # Generate a unique uid for the ping
+        import time
+
+        uid = int(time.time() * 1000) % 0xFFFFFFFF
+        self._connection.send_ping(uid)
+        self.protocol.transmit()
+        logger.debug("Sent QUIC PING frame for keepalive")
+
     def close(self):
         """Close the connection."""
         if self.protocol:
@@ -258,6 +272,19 @@ class QUICClient:
             except RuntimeError:
                 pass
             self._connection_cm = None
+
+    async def aclose(self):
+        """Close the connection and wait for aioquic resources to shut down."""
+        if self.protocol:
+            self.protocol.close()
+            logger.info("QUIC connection closed")
+        if self._connection_cm is not None:
+            try:
+                await self._connection_cm.__aexit__(None, None, None)
+            finally:
+                self._connection_cm = None
+                self.protocol = None
+                self._connection = None
 
 
 class QUICServer:

@@ -1,0 +1,152 @@
+.universal-video-card {
+  background: #16213e;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(0, 212, 255, 0.3);
+}
+
+.video-container {
+  position: relative;
+  background: #000;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+}
+
+.video-stream {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+.video-stream.mjpeg {
+  /* MJPEG streams via img tag */
+}
+
+.video-stream.h264 {
+  /* H.264 decoded to canvas */
+  background: #000;
+}
+
+.video-stream.webrtc {
+  /* WebRTC video element */
+  background: #000;
+}
+
+.placeholder {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 200px;
+  color: #666;
+  font-size: 14px;
+}
+
+.status-overlay {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  align-items: flex-end;
+}
+
+.status-badge {
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: bold;
+}
+
+.status-badge.active {
+  background: rgba(0, 255, 136, 0.2);
+  color: #00ff88;
+}
+
+.status-badge.connecting {
+  background: rgba(255, 193, 7, 0.2);
+  color: #ffc107;
+}
+
+.status-badge.error {
+  background: rgba(255, 51, 102, 0.2);
+  color: #ff3366;
+}
+
+.status-badge.inactive {
+  background: rgba(108, 117, 125, 0.2);
+  color: #6c757d;
+}
+
+.format-badge {
+  padding: 2px 8px;
+  background: rgba(0, 212, 255, 0.2);
+  color: #00d4ff;
+  border-radius: 4px;
+  font-size: 10px;
+  font-family: monospace;
+}
+
+.error-badge {
+  padding: 4px 8px;
+  background: rgba(255, 51, 102, 0.3);
+  color: #ff3366;
+  border-radius: 4px;
+  font-size: 11px;
+  max-width: 200px;
+  word-wrap: break-word;
+}
+
+.video-info {
+  padding: 12px 15px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid rgba(0, 212, 255, 0.1);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.info-left {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.video-title {
+  font-weight: 600;
+  color: #fff;
+  font-size: 14px;
+}
+
+.track-id {
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+}
+
+.info-right {
+  text-align: right;
+}
+
+.stream-stats {
+  font-size: 11px;
+  color: #00d4ff;
+  background: rgba(0, 212, 255, 0.1);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+
+.debug-info {
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.3);
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.debug-info pre {
+  margin: 0;
+  font-size: 10px;
+  color: #888;
+  overflow-x: auto;
+}

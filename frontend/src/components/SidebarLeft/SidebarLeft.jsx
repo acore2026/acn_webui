@@ -25,7 +25,10 @@ const SidebarLeft = ({ agents }) => {
                 {agent.agent_status}
               </span>
             </div>
-            <div className="agent-meta">ID: {agent.agent_id}</div>
+            <div className="agent-meta">
+              <span className="agent-meta-label">ID:</span>
+              <span className="agent-meta-value">{agent.agent_id}</span>
+            </div>
             <div className="agent-capabilities">
               {(agent.agent_capability || []).map((cap, idx) => (
                 <span key={idx} className="capability-tag">{cap}</span>

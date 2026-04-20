@@ -2,7 +2,8 @@ import React from 'react';
 import './StatusGrid.css';
 
 const StatusCard = ({ agent }) => {
-  const workStatus = agent.work_status || 'idle';
+  const rawStatus = agent.work_status || 'idle';
+  const workStatus = rawStatus === 'online' ? 'tracking' : rawStatus;
   const taskInfo = agent.current_task || 'No active task';
 
   return (

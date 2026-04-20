@@ -19,9 +19,9 @@ from moq.encoding import FullTrackName
 
 # Test configuration
 RELAY_HOST = "localhost"
-RELAY_PORT = 9004  # Use test relay port
-TASK_ID = "test-video"
-AGENT_ID = "test-publisher"
+RELAY_PORT = 9003  # Use agent_gw relay
+TASK_ID = "test-ffmpeg-video"
+AGENT_ID = "ffmpeg-publisher"
 
 
 async def main():

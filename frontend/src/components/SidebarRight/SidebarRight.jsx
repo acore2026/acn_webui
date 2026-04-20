@@ -593,6 +593,7 @@ const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
   // Use real streams if available
   const hasRealStreams = videoStreams && videoStreams.length > 0;
   const hasMoqStreams = Object.keys(moqFrames).length > 0;
+  const hasSimulationStreams = videoStreams.some(s => s.stream_type === 'simulation');
 
   return (
     <aside className="sidebar-right">
@@ -614,9 +615,18 @@ const SidebarRight = ({ videoStreams = [], moqFrames = {} }) => {
               frameInfo={frameInfo}
             />
           ))
+        ) : hasSimulationStreams ? (
+          // Show simulated video streams
+          videoStreams.filter(s => s.stream_type === 'simulation').map((stream, index) => (
+            <SimulatedVideoCard
+              key={stream.stream_id || index}
+              index={index}
+              agentName={stream.agent_name || 'Demo Agent'}
+            />
+          ))
         ) : hasRealStreams ? (
           // Show WebRTC video streams
-          videoStreams.map((stream, index) => (
+          videoStreams.filter(s => s.stream_type !== 'simulation').map((stream, index) => (
             <RealVideoCard
               key={stream.stream_id || index}
               stream={stream}

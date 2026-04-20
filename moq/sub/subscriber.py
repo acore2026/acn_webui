@@ -7,6 +7,7 @@ import asyncio
 import logging
 from typing import Optional, Callable, Dict, List
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from moq.session import MOQSession, Role, Subscription
 from moq.messages import (
@@ -28,6 +29,13 @@ from moq.transport import QUICClient, StreamData, DatagramData
 from moq.session import SETUP_AGENT_ID_PARAM
 
 logger = logging.getLogger(__name__)
+
+# Default stream buffer timeout (seconds)
+DEFAULT_STREAM_BUFFER_TIMEOUT = 60.0
+# Maximum stream buffer size (bytes) before forced cleanup
+DEFAULT_MAX_STREAM_BUFFER_SIZE = 10 * 1024 * 1024  # 10MB
+# Default heartbeat interval (seconds) - should be less than NAT timeout
+DEFAULT_HEARTBEAT_INTERVAL = 25.0
 
 
 @dataclass
@@ -94,6 +102,22 @@ class MOQSubscriber:
         self._object_queue: asyncio.Queue = asyncio.Queue()
         self._control_buffer = b""
 
+        # Stream buffer management for production safety
+        self._stream_buffer_timeout = DEFAULT_STREAM_BUFFER_TIMEOUT
+        self._stream_buffer_last_activity: Dict[
+            int, datetime
+        ] = {}  # stream_id -> last activity time
+        self._max_stream_buffer_size = DEFAULT_MAX_STREAM_BUFFER_SIZE
+
+        # Cleanup task
+        self._cleanup_task: Optional[asyncio.Task] = None
+        self._running = False
+
+        # Heartbeat task to keep connection alive
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval = DEFAULT_HEARTBEAT_INTERVAL
+        self._last_activity: Optional[float] = None
+
         logger.info(f"MOQSubscriber initialized for {relay_host}:{relay_port}")
 
     def set_handlers(
@@ -143,11 +167,19 @@ class MOQSubscriber:
 
             logger.info("Connected to relay")
 
+            # Start heartbeat task to keep connection alive
+            self._last_activity = asyncio.get_event_loop().time()
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
             if self._on_connected:
                 self._on_connected()
 
             # Start object processing task
             asyncio.create_task(self._process_objects())
+
+            # Start stream buffer cleanup task
+            self._running = True
+            self._cleanup_task = asyncio.create_task(self._cleanup_stream_buffers())
 
             return True
 
@@ -158,6 +190,20 @@ class MOQSubscriber:
     def disconnect(self):
         """Disconnect from relay."""
         logger.info("Disconnecting from relay")
+
+        # Stop heartbeat task
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            self._heartbeat_task = None
+
+        # Stop cleanup task
+        self._running = False
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
+
+        # Clean up all stream buffers
+        self._cleanup_all_stream_buffers()
 
         if self._session:
             self._session.close()
@@ -289,7 +335,7 @@ class MOQSubscriber:
     async def _handle_stream_data(self, protocol, data: StreamData):
         """Handle incoming stream data."""
         logger.debug(
-            f"Received stream data: stream_id={data.stream_id}, length={len(data.data)}, end_stream={data.end_stream}"
+            f"[STREAM] Received stream data: stream_id={data.stream_id}, length={len(data.data)}, end_stream={data.end_stream}"
         )
 
         if data.stream_id == 0:
@@ -307,9 +353,22 @@ class MOQSubscriber:
                 }
             self._stream_buffers[data.stream_id] += data.data
 
+            # Update activity timestamp
+            self._stream_buffer_last_activity[data.stream_id] = datetime.now()
+
             logger.debug(
                 f"[STREAM] stream_id={data.stream_id} accumulated {len(self._stream_buffers[data.stream_id])} bytes, end_stream={data.end_stream}"
             )
+
+            # Check if buffer size exceeds limit
+            buffer_size = len(self._stream_buffers[data.stream_id])
+            if buffer_size > self._max_stream_buffer_size:
+                logger.warning(
+                    f"Stream buffer exceeded max size for stream_id={data.stream_id}: {buffer_size} bytes. "
+                    f"Force cleanup."
+                )
+                await self._cleanup_stream(data.stream_id, force=True)
+                return
 
             # Process available data immediately for streaming mode
             # This handles the case where end_stream may never be set
@@ -317,18 +376,14 @@ class MOQSubscriber:
 
             if data.end_stream:
                 # Process any remaining data and clean up
-                await self._process_stream_buffer_incremental(
-                    data.stream_id, force=True
-                )
-                if data.stream_id in self._stream_buffers:
-                    del self._stream_buffers[data.stream_id]
-                if data.stream_id in self._stream_parser_state:
-                    del self._stream_parser_state[data.stream_id]
-                logger.debug(f"[STREAM] Stream ended: stream_id={data.stream_id}")
+                await self._cleanup_stream(data.stream_id, force=True)
 
     async def _handle_control_data(self, data: bytes, end_stream: bool = False):
         """Handle control message data."""
         self._control_buffer += data
+
+        # Update activity timestamp on any control data
+        self._update_activity()
 
         while self._control_buffer:
             try:
@@ -482,6 +537,9 @@ class MOQSubscriber:
                     logger.debug(
                         f"[STREAM] Parsed subgroup header: track_alias={header.track_alias}, group={header.group_id}"
                     )
+                    logger.debug(
+                        f"[STREAM] Parsed subgroup header: track_alias={header.track_alias}, group={header.group_id}"
+                    )
                 except Exception as e:
                     # Not enough data for header
                     logger.debug(f"[STREAM] Incomplete header: {e}")
@@ -530,6 +588,9 @@ class MOQSubscriber:
 
                     obj_key = (current_object["id"], header.group_id)
                     if obj_key not in parsed_objects:
+                        logger.debug(
+                            f"[STREAM] Queueing object: group={header.group_id}, obj={current_object['id']}, size={len(current_object['payload'])}"
+                        )
                         await self._object_queue.put(obj)
                         parsed_objects.add(obj_key)
                         objects_parsed += 1
@@ -568,6 +629,9 @@ class MOQSubscriber:
 
                         obj_key = (object_id, header.group_id)
                         if obj_key not in parsed_objects:
+                            print(
+                                f"[MOQ DEBUG] Queuing complete object: group={header.group_id}, obj={object_id}, size={payload_len}"
+                            )
                             await self._object_queue.put(obj)
                             parsed_objects.add(obj_key)
                             objects_parsed += 1
@@ -594,6 +658,9 @@ class MOQSubscriber:
 
                             obj_key = (object_id, header.group_id)
                             if obj_key not in parsed_objects:
+                                logger.debug(
+                                    f"[STREAM] Queueing object: group={header.group_id}, obj={object_id}, size={payload_len}"
+                                )
                                 await self._object_queue.put(obj)
                                 parsed_objects.add(obj_key)
                                 objects_parsed += 1
@@ -623,6 +690,9 @@ class MOQSubscriber:
 
     async def _handle_datagram(self, protocol, data: DatagramData):
         """Handle incoming datagram."""
+        # Update activity timestamp on receiving datagram
+        self._update_activity()
+
         try:
             datagram, _ = ObjectDatagram.decode(data.data)
 
@@ -645,24 +715,101 @@ class MOQSubscriber:
         except Exception as e:
             logger.warning(f"Failed to handle datagram: {e}")
 
-    async def _handle_close(self, protocol, error_code: int, reason: str):
-        """Handle connection close."""
-        logger.info(f"Connection closed: error={error_code}, reason={reason}")
-        self.disconnect()
-
-    async def _process_objects(self):
-        """Process received objects from queue."""
-        while True:
+    async def _cleanup_stream_buffers(self):
+        """Periodically clean up stale stream buffers."""
+        while self._running:
             try:
-                obj = await self._object_queue.get()
+                await asyncio.sleep(10.0)  # Check every 10 seconds
 
-                if self._on_object_received:
-                    self._on_object_received(obj)
+                if not self._running:
+                    break
+
+                now = datetime.now()
+                streams_to_cleanup = []
+
+                for stream_id, last_activity in list(
+                    self._stream_buffer_last_activity.items()
+                ):
+                    # Check if buffer is stale
+                    if (
+                        now - last_activity
+                    ).total_seconds() > self._stream_buffer_timeout:
+                        buffer_size = len(self._stream_buffers.get(stream_id, b""))
+                        if buffer_size > 0:
+                            logger.warning(
+                                f"Cleaning up stale stream buffer: stream_id={stream_id}, "
+                                f"age={(now - last_activity).total_seconds():.1f}s, size={buffer_size} bytes"
+                            )
+                            streams_to_cleanup.append(stream_id)
+
+                for stream_id in streams_to_cleanup:
+                    await self._cleanup_stream(stream_id)
 
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Error processing object: {e}")
+                logger.error(f"Error in stream buffer cleanup: {e}")
+
+    async def _cleanup_stream(self, stream_id: int, force: bool = False):
+        """Clean up a specific stream buffer and parser state."""
+        try:
+            if force:
+                await self._process_stream_buffer_incremental(stream_id, force=True)
+
+            if stream_id in self._stream_buffers:
+                del self._stream_buffers[stream_id]
+            if stream_id in self._stream_parser_state:
+                del self._stream_parser_state[stream_id]
+            if stream_id in self._stream_buffer_last_activity:
+                del self._stream_buffer_last_activity[stream_id]
+
+            logger.debug(f"Cleaned up stream: stream_id={stream_id}")
+        except Exception as e:
+            logger.error(f"Error cleaning up stream {stream_id}: {e}")
+
+    def _cleanup_all_stream_buffers(self):
+        """Clean up all stream buffers on disconnect."""
+        self._stream_buffers.clear()
+        self._stream_parser_state.clear()
+        self._stream_buffer_last_activity.clear()
+        logger.debug("Cleaned up all stream buffers")
+
+    async def _handle_close(self, protocol, error_code: int, reason: str):
+        """Handle connection close."""
+        logger.info(f"Connection closed: error={error_code}, reason={reason}")
+
+        # Stop cleanup task
+        self._running = False
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            self._cleanup_task = None
+
+        # Clean up all resources
+        self._cleanup_all_stream_buffers()
+
+        # Call disconnect to close session and client
+        self.disconnect()
+
+    async def _process_objects(self):
+        """Process received objects from queue."""
+        logger.debug("[STREAM] _process_objects task started")
+        while True:
+            try:
+                obj = await self._object_queue.get()
+                logger.debug(
+                    f"[STREAM] Processing object: group={obj.group_id}, obj={obj.object_id}, size={len(obj.payload)}"
+                )
+
+                if self._on_object_received:
+                    self._on_object_received(obj)
+                else:
+                    logger.warning("[STREAM] No object received callback set")
+
+            except asyncio.CancelledError:
+                logger.debug("[STREAM] _process_objects cancelled")
+                break
+            except Exception as e:
+                logger.error(f"[STREAM] Error processing object: {e}")
 
     def get_active_subscriptions(self) -> List[FullTrackName]:
         """Get list of currently subscribed tracks."""
@@ -680,3 +827,41 @@ class MOQSubscriber:
             return await asyncio.wait_for(self._object_queue.get(), timeout=timeout)
         except asyncio.TimeoutError:
             return None
+
+    async def _heartbeat_loop(self):
+        """Send periodic heartbeat to keep connection alive using QUIC PING frames."""
+        logger.debug("Heartbeat loop started")
+        while self._client and self._session:
+            try:
+                await asyncio.sleep(self._heartbeat_interval)
+
+                if not self._client or not self._session:
+                    break
+
+                # Check if we need to send a heartbeat
+                now = asyncio.get_event_loop().time()
+                time_since_last_activity = now - (self._last_activity or now)
+
+                if time_since_last_activity >= self._heartbeat_interval:
+                    # Send QUIC PING frame to keep connection alive
+                    # PING frames are explicitly treated as connection activity by QUIC
+                    try:
+                        await self._client.send_ping()
+                        logger.debug("Sent heartbeat (QUIC PING frame)")
+                    except Exception as e:
+                        logger.warning(f"Failed to send heartbeat: {e}")
+
+                self._last_activity = now
+
+            except asyncio.CancelledError:
+                logger.debug("Heartbeat loop cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in heartbeat loop: {e}")
+                await asyncio.sleep(5.0)  # Wait a bit before retrying
+
+        logger.debug("Heartbeat loop ended")
+
+    def _update_activity(self):
+        """Update last activity timestamp."""
+        self._last_activity = asyncio.get_event_loop().time()

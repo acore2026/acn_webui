@@ -10,8 +10,8 @@ const MessageLog = ({ messages, onClear }) => {
       </div>
       
       <div className="message-log">
-        {messages.map((msg, idx) => (
-          <div key={idx} className="message-item">
+        {[...messages].reverse().map((msg, idx) => (
+          <div key={messages.length - idx} className="message-item">
             <span className="message-time">[{msg.time}]</span>
             <span className="message-content">
               <span style={{ color: 'var(--accent-cyan)' }}>{msg.from}</span>

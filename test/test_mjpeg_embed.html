@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>MJPEG Embed Test</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background: #1a1a2e;
+            color: white;
+            padding: 20px;
+        }
+        h1 { color: #00d4ff; }
+        .test-section {
+            margin: 20px 0;
+            padding: 20px;
+            background: #16213e;
+            border-radius: 8px;
+            border: 1px solid #00d4ff;
+        }
+        .video-container {
+            display: inline-block;
+            border: 2px solid #00d4ff;
+            border-radius: 8px;
+            overflow: hidden;
+            margin: 10px;
+        }
+        img {
+            display: block;
+        }
+        iframe {
+            border: none;
+            background: #000;
+        }
+        .method {
+            color: #00d4ff;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        code {
+            background: rgba(0,0,0,0.3);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #00ff88;
+        }
+    </style>
+</head>
+<body>
+    <h1>🔴 MJPEG Display Test</h1>
+    <p>Testing different methods to embed MJPEG stream in WebUI</p>
+
+    <div class="test-section">
+        <div class="method">Method 1: Direct &lt;img&gt; tag</div>
+        <p>URL: <code>http://localhost:8080/mjpeg</code></p>
+        <div class="video-container">
+            <img src="http://localhost:8080/mjpeg" width="640" height="360" alt="MJPEG Stream" />
+        </div>
+    </div>
+
+    <div class="test-section">
+        <div class="method">Method 2: &lt;iframe&gt; embed</div>
+        <p>URL: <code>http://localhost:8080/embed</code></p>
+        <div class="video-container">
+            <iframe src="http://localhost:8080/embed" width="640" height="360"></iframe>
+        </div>
+    </div>
+
+    <div class="test-section">
+        <div class="method">Method 3: &lt;iframe&gt; with MJPEG URL</div>
+        <p>URL: <code>http://localhost:8080/mjpeg</code></p>
+        <div class="video-container">
+            <iframe src="http://localhost:8080/mjpeg" width="640" height="360"></iframe>
+        </div>
+    </div>
+
+    <div class="test-section">
+        <div class="method">Method 4: Single frame (updates every second)</div>
+        <p>URL: <code>http://localhost:8080/latest</code></p>
+        <div class="video-container">
+            <img id="latest-frame" src="http://localhost:8080/latest" width="640" height="360" alt="Latest Frame" />
+        </div>
+    </div>
+
+    <script>
+        // Auto-refresh single frame
+        setInterval(() => {
+            const img = document.getElementById('latest-frame');
+            img.src = 'http://localhost:8080/latest?' + Date.now();
+        }, 1000);
+    </script>
+</body>
+</html>
