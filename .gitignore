@@ -12,6 +12,7 @@ frontend/.cache/
 *.log
 
 # Virtual environment
+.venv/
 venv/
 env/
 ENV/
@@ -34,3 +35,15 @@ Thumbs.db
 # Temporary files
 /tmp/
 *.tmp
+*.pid
+
+# Logs and runtime state
+logs/
+
+# Python tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local tool state
+.codex
