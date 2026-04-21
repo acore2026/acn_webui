@@ -41,6 +41,7 @@ export interface TopologyLinkModel {
 }
 
 export type MessageLevel = 'info' | 'warning' | 'error';
+export type ElementStatus = 'online' | 'offline' | 'degraded';
 
 export interface MessageFeedItem {
   id: string;
@@ -51,8 +52,89 @@ export interface MessageFeedItem {
   source: string;
 }
 
+export interface BackendLogEntry {
+  time?: string;
+  level?: string;
+  message: string;
+}
+
+export interface NetworkElementLogSource {
+  id: string;
+  name: string;
+  path: string;
+  entries: BackendLogEntry[];
+  error?: string | null;
+}
+
+export interface NetworkElementLogGroup {
+  id: string;
+  name: string;
+  path: string;
+  entries: BackendLogEntry[];
+  subLogs?: NetworkElementLogSource[];
+  error?: string | null;
+}
+
+export interface ControlTaskAgent {
+  id: string;
+  name: string;
+}
+
+export interface ControlTask {
+  id: string;
+  taskName: string;
+  taskType: string;
+  description: string;
+  status: 'processing' | 'finished';
+  involvedAgents: ControlTaskAgent[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ElementComponentModel {
+  id: string;
+  name: string;
+  port: number;
+  protocol: string;
+  status: 'online' | 'offline';
+  description: string;
+}
+
+export interface ElementGroupModel {
+  id: string;
+  name: string;
+  status: ElementStatus;
+  summary: string;
+  components: ElementComponentModel[];
+}
+
+export interface MessageFlowNodeModel {
+  id: string;
+  name: string;
+  status: 'online' | 'offline';
+  position: {
+    x: number;
+    y: number;
+  };
+}
+
+export interface MessageFlowEdgeModel {
+  id: string;
+  source: string;
+  target: string;
+  count: number;
+  lastMessage: string;
+  lastTimestamp?: string;
+  active: boolean;
+}
+
 export interface DashboardMockData {
   metrics: MetricCardModel[];
+  elements: ElementGroupModel[];
+  messageFlow: {
+    nodes: MessageFlowNodeModel[];
+    edges: MessageFlowEdgeModel[];
+  };
   topology: {
     agents: TopologyAgentModel[];
     links: TopologyLinkModel[];

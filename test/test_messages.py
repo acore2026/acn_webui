@@ -24,12 +24,12 @@ import json
 import time
 import sys
 import argparse
+import socket
 from datetime import datetime
 
 # Backend API endpoints
-BACKEND_URL = "http://localhost:9050"
-PIPELINE_LOGS_URL = f"{BACKEND_URL}/acn/v3/pipeline-logs"
-ELEMENT_LOGS_URL = f"{BACKEND_URL}/acn/v3/element-logs"
+DEFAULT_BACKEND_HOST = "127.0.0.1"
+DEFAULT_BACKEND_PORT = 9005
 
 # Test agent IDs
 TEST_AGENTS = [
@@ -39,8 +39,9 @@ TEST_AGENTS = [
 ]
 
 
-def send_pipeline_log(source, destination, protocol, abstract, content, task_id=None):
+def send_pipeline_log(backend_url, source, destination, protocol, abstract, content, task_id=None):
     """Send pipeline log message (for Message Flow)"""
+    pipeline_logs_url = f"{backend_url}/acn/v3/pipeline-logs"
     payload = {
         "method": "POST",
         "url": "/acn/v3/pipeline-logs",
@@ -58,7 +59,7 @@ def send_pipeline_log(source, destination, protocol, abstract, content, task_id=
     }
     
     try:
-        resp = requests.post(PIPELINE_LOGS_URL, json=payload, timeout=5)
+        resp = requests.post(pipeline_logs_url, json=payload, timeout=5)
         if resp.status_code == 200:
             print(f"  [Pipeline] {source} -> {destination}: {abstract[:40]}... ✓")
             return True
@@ -70,8 +71,9 @@ def send_pipeline_log(source, destination, protocol, abstract, content, task_id=
         return False
 
 
-def send_element_log(element_id, log_type, agent_id, agent_name=None, **kwargs):
+def send_element_log(backend_url, element_id, log_type, agent_id, agent_name=None, **kwargs):
     """Send element log message (for Agent Status)"""
+    element_logs_url = f"{backend_url}/acn/v3/element-logs"
     content = {"agent_id": agent_id}
     if agent_name:
         content["agent_name"] = agent_name
@@ -113,7 +115,7 @@ def send_element_log(element_id, log_type, agent_id, agent_name=None, **kwargs):
     }
     
     try:
-        resp = requests.post(ELEMENT_LOGS_URL, json=payload, timeout=5)
+        resp = requests.post(element_logs_url, json=payload, timeout=5)
         if resp.status_code == 200:
             print(f"  [Element] {element_id} | {log_type} | {agent_id[:25]}... ✓")
             return True
@@ -125,7 +127,7 @@ def send_element_log(element_id, log_type, agent_id, agent_name=None, **kwargs):
         return False
 
 
-def test_pipeline_messages():
+def test_pipeline_messages(backend_url):
     """Test pipeline logs (Message Flow)"""
     print("\n=== Testing Pipeline Logs (Message Flow) ===")
     
@@ -143,34 +145,51 @@ def test_pipeline_messages():
     ]
     
     for src, dst, proto, abstract, content, task_id in messages:
-        send_pipeline_log(src, dst, proto, abstract, content, task_id)
+        send_pipeline_log(backend_url, src, dst, proto, abstract, content, task_id)
         time.sleep(0.3)
 
 
-def test_element_messages():
+def test_topology_demo(backend_url, step_delay=0.12):
+    """Send a focused topology-map demo with canonical node names."""
+    print("\n=== Testing Topology Map Demo ===")
+
+    messages = [
+        ("ACN SDK", "ACN Agent", "HTTP/2", "Register agent identity", "ACN SDK starts identity registration", "topology-001"),
+        ("ACN Agent", "IDM", "HTTP/2", "/idm/v1/identity-applications已转发到IDM", "ACN Agent forwards the identity application to IDM", "topology-001"),
+        ("IDM", "ACN SDK", "HTTP/2", "/idm/v1/identity-applications响应返回ACN SDK", "IDM returns the identity application response to ACN SDK", "topology-001"),
+        ("ACN Agent", "AgentGW", "HTTP/2", "/arf/v1/agent-cards已转发到AgentGW", "ACN Agent forwards the agent card to AgentGW", "topology-002"),
+        ("AgentGW", "ACN SDK", "HTTP/2", "/arf/v1/agent-cards响应返回ACN SDK", "AgentGW returns the agent-card response to ACN SDK", "topology-002"),
+    ]
+
+    for src, dst, proto, abstract, content, task_id in messages:
+        send_pipeline_log(backend_url, src, dst, proto, abstract, content, task_id)
+        time.sleep(step_delay)
+
+
+def test_element_messages(backend_url):
     """Test element logs (Agent Work Status)"""
     print("\n=== Testing Element Logs (Agent Work Status) ===")
     
     # ApplyProfile - 申请数字身份
     print("\n  > ApplyProfile (申请数字身份):")
-    send_element_log("IDM", "ApplyProfile", "did:acn:agent:987654321", "Alice的个人助手", 
+    send_element_log(backend_url, "IDM", "ApplyProfile", "did:acn:agent:987654321", "Alice的个人助手", 
                     owner="user-001", capability="6G业务开通")
     time.sleep(0.5)
     
     # PublishAgent - 能力注册
     print("\n  > PublishAgent (能力注册):")
-    send_element_log("AgentGW", "PublishAgent", "did:acn:agent:987654321", "Alice的个人助手",
+    send_element_log(backend_url, "AgentGW", "PublishAgent", "did:acn:agent:987654321", "Alice的个人助手",
                     capability="跌倒监测-手环")
     time.sleep(0.5)
     
     # SetupConnection - 入网
     print("\n  > SetupConnection (入网):")
-    send_element_log("AgentGW", "SetupConnection", "did:acn:agent:987654321")
+    send_element_log(backend_url, "AgentGW", "SetupConnection", "did:acn:agent:987654321")
     time.sleep(0.5)
     
     # LLMMessage - 路由/处理
     print("\n  > LLMMessage (LLM处理):")
-    send_element_log("ACN Agent", "LLMMessage", "did:acn:agent:987654321",
+    send_element_log(backend_url, "ACN Agent", "LLMMessage", "did:acn:agent:987654321",
                     message="Analyzing user request for health monitoring...")
     time.sleep(0.5)
     
@@ -182,11 +201,11 @@ def test_element_messages():
         ("did:acn:agent:003", "Ground Unit 1", "SetupConnection"),
     ]
     for agent_id, name, log_type in agents_data:
-        send_element_log("AgentGW", log_type, agent_id, name)
+        send_element_log(backend_url, "AgentGW", log_type, agent_id, name)
         time.sleep(0.3)
 
 
-def test_mixed_scenario():
+def test_mixed_scenario(backend_url):
     """Test a realistic mixed scenario"""
     print("\n=== Testing Mixed Scenario (Realistic Flow) ===")
     
@@ -195,66 +214,109 @@ def test_mixed_scenario():
     
     # 1. Agent 申请数字身份
     print("\n  Step 1: Agent applying for identity...")
-    send_element_log("IDM", "ApplyProfile", agent_id, agent_name, 
+    send_element_log(backend_url, "IDM", "ApplyProfile", agent_id, agent_name, 
                     owner="test-user", capability="surveillance")
-    send_pipeline_log("Agent GW", "IDM", "HTTP/2", "Apply for digital identity", 
+    send_pipeline_log(backend_url, "Agent GW", "IDM", "HTTP/2", "Apply for digital identity", 
                      f"Agent {agent_name} requesting identity", "task-init")
     time.sleep(1)
     
     # 2. IDM 返回验证结果
     print("\n  Step 2: IDM verification...")
-    send_pipeline_log("IDM", "Agent GW", "HTTP/2", "Identity verification completed", 
+    send_pipeline_log(backend_url, "IDM", "Agent GW", "HTTP/2", "Identity verification completed", 
                      "VC issued with surveillance capability", "task-init")
     time.sleep(1)
     
     # 3. Agent 注册能力
     print("\n  Step 3: Agent registering capabilities...")
-    send_element_log("AgentGW", "PublishAgent", agent_id, agent_name,
+    send_element_log(backend_url, "AgentGW", "PublishAgent", agent_id, agent_name,
                     capability="面部识别-追踪-驱逐")
-    send_pipeline_log(agent_name, "ARF", "HTTP/2", "Register capabilities", 
+    send_pipeline_log(backend_url, agent_name, "ARF", "HTTP/2", "Register capabilities", 
                      "Publishing agent capabilities to repository", "task-reg")
     time.sleep(1)
     
     # 4. 建立连接
     print("\n  Step 4: Setting up connection...")
-    send_element_log("AgentGW", "SetupConnection", agent_id, agent_name)
-    send_pipeline_log("ACF", agent_name, "WebSocket", "Connection established", 
+    send_element_log(backend_url, "AgentGW", "SetupConnection", agent_id, agent_name)
+    send_pipeline_log(backend_url, "ACF", agent_name, "WebSocket", "Connection established", 
                      "WebSocket connection active", None)
     time.sleep(1)
     
     # 5. 开始任务
     print("\n  Step 5: Agent starting task...")
-    send_element_log("ACN Agent", "LLMMessage", agent_id, agent_name,
+    send_element_log(backend_url, "ACN Agent", "LLMMessage", agent_id, agent_name,
                     message="Task received: Patrol sector A")
-    send_pipeline_log(agent_name, "MOQT Relay", "MOQT", "Subscribe to video feed", 
+    send_pipeline_log(backend_url, agent_name, "MOQT Relay", "MOQT", "Subscribe to video feed", 
                      "Subscribing to sector-a-feed", "task-001")
     time.sleep(1)
     
     # 6. 任务执行中
     print("\n  Step 6: Task in progress...")
-    send_pipeline_log(agent_name, "System", "Internal", "Status update", 
+    send_pipeline_log(backend_url, agent_name, "System", "Internal", "Status update", 
                      "Patrol progress: 45% complete", "task-001")
-    send_pipeline_log(agent_name, "System", "Internal", "Detection alert", 
+    send_pipeline_log(backend_url, agent_name, "System", "Internal", "Detection alert", 
                      "Suspicious activity detected at checkpoint 3", "task-001")
     time.sleep(1)
     
     print("\n  Scenario completed!")
 
 
-def check_backend():
-    """Check if backend is running"""
+def test_full_system_demo(backend_url, step_delay=0.22):
+    """Run the backend's full local demo so all dashboard surfaces update together."""
+    print("\n=== Testing Local Full Demo ===")
     try:
-        resp = requests.get(f"{BACKEND_URL}/api/health", timeout=3)
-        if resp.status_code == 200:
-            data = resp.json()
-            print(f"✓ Backend is running at {BACKEND_URL}")
-            print(f"  Status: {data.get('status')}")
-            print(f"  WebSocket clients: {data.get('websocket_clients')}")
+        resp = requests.post(
+            f"{backend_url}/api/control/test-messages/full-demo",
+            json={"rounds": 1, "step_delay_seconds": step_delay},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception as e:
+        print(f"  [Full Demo] Error: {e}")
+        return False
+
+    dashboard = payload.get("dashboard", {})
+    metrics = dashboard.get("metrics", [])
+    tasks = payload.get("tasks", [])
+    print(f"  [Full Demo] {payload.get('message', 'Demo injected')} ✓")
+    if metrics:
+        active_agents = next((item.get("value") for item in metrics if item.get("id") == "agents"), "n/a")
+        running_tasks = next((item.get("value") for item in metrics if item.get("id") == "tasks"), "n/a")
+        print(f"  [Full Demo] Active Agents: {active_agents}")
+        print(f"  [Full Demo] Running Tasks: {running_tasks}")
+    print(f"  [Full Demo] Task cards returned: {len(tasks)}")
+    return True
+
+
+def check_backend(backend_url):
+    """Check if backend is running"""
+    host = backend_url.split("://", 1)[-1].split(":", 1)[0]
+    port = int(backend_url.rsplit(":", 1)[-1])
+
+    for path in ("/api/health", "/api/dashboard/overview"):
+        try:
+            resp = requests.get(f"{backend_url}{path}", timeout=3)
+            if resp.status_code == 200:
+                print(f"✓ Backend is running at {backend_url}")
+                if path == "/api/health":
+                    data = resp.json()
+                    print(f"  Status: {data.get('status')}")
+                    print(f"  WebSocket clients: {data.get('websocket_clients')}")
+                else:
+                    print("  Dashboard snapshot endpoint responded successfully")
+                return True
+        except Exception:
+            pass
+
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            print(f"✓ Backend port is reachable at {backend_url}")
+            print("  HTTP health endpoint did not respond in this environment, but the port is open")
             return True
-    except:
+    except OSError:
         pass
     
-    print(f"✗ Backend is NOT running at {BACKEND_URL}")
+    print(f"✗ Backend is NOT running at {backend_url}")
     print("  Please start the backend first:")
     print("    cd /root/lpx/webui && ./start.sh")
     return False
@@ -264,22 +326,30 @@ def main():
     parser = argparse.ArgumentParser(description="Test frontend display with sample messages")
     parser.add_argument("--pipeline", action="store_true", help="Only send pipeline logs")
     parser.add_argument("--element", action="store_true", help="Only send element logs")
+    parser.add_argument("--topology-demo", action="store_true", help="Send a focused topology-map message sequence")
+    parser.add_argument("--full-demo", action="store_true", help="Send a local registration and interaction demo")
     parser.add_argument("--all", action="store_true", help="Send all message types (default)")
     parser.add_argument("--count", type=int, default=1, help="Number of rounds to send (default: 1)")
     parser.add_argument("--delay", type=int, default=2, help="Delay between rounds in seconds (default: 2)")
+    parser.add_argument("--step-delay", type=float, default=0.12, help="Delay between topology-demo messages in seconds (default: 0.12)")
+    parser.add_argument("--host", default=DEFAULT_BACKEND_HOST, help=f"Backend host (default: {DEFAULT_BACKEND_HOST})")
+    parser.add_argument("--port", type=int, default=DEFAULT_BACKEND_PORT, help=f"Backend port (default: {DEFAULT_BACKEND_PORT})")
     
     args = parser.parse_args()
     
     # If no specific type selected, default to all
-    if not (args.pipeline or args.element):
+    if not (args.pipeline or args.element or args.topology_demo or args.full_demo):
         args.all = True
     
     print("=" * 60)
     print("  Frontend Display Test Script")
     print("=" * 60)
+
+    backend_url = f"http://{args.host}:{args.port}"
+    print(f"  Target backend: {backend_url}")
     
     # Check backend
-    if not check_backend():
+    if not check_backend(backend_url):
         sys.exit(1)
     
     # Run tests
@@ -290,13 +360,19 @@ def main():
             print(f"{'='*60}")
         
         if args.all or args.pipeline:
-            test_pipeline_messages()
-        
+            test_pipeline_messages(backend_url)
+
+        if args.topology_demo:
+            test_topology_demo(backend_url, step_delay=args.step_delay)
+
+        if args.full_demo:
+            test_full_system_demo(backend_url, step_delay=args.step_delay)
+
         if args.all or args.element:
-            test_element_messages()
+            test_element_messages(backend_url)
         
         if args.all:
-            test_mixed_scenario()
+            test_mixed_scenario(backend_url)
         
         # Delay between rounds (except last)
         if round_num < args.count:
@@ -307,9 +383,10 @@ def main():
     print("  Test completed!")
     print("=" * 60)
     print("\nCheck the frontend to see:")
-    print("  1. Message Flow - pipeline messages")
-    print("  2. Agent Work Status - element log updates")
-    print("  3. Registered Agents - sidebar updates")
+    print("  1. Active Agents - demo agents appear in Overview and Agents")
+    print("  2. Running Tasks - task cards appear in Overview and Control")
+    print("  3. Message Flow - pipeline messages drive the Topology Map")
+    print("  4. System Events - backend log feed shows the local demo steps")
 
 
 if __name__ == "__main__":

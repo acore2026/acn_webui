@@ -1,9 +1,19 @@
 import { NavKey } from '../types';
-import { AgentsIcon, ControlIcon, NetworkIcon, OverviewIcon, SettingsIcon } from './icons';
+import { LanguageMode, shellCopy } from '../i18n';
+import { AgentsIcon, ControlIcon, NetworkIcon, OverviewIcon, SettingsIcon, SignalIcon } from './icons';
+import { LanguageSettingsButton } from './LanguageSettingsButton';
+import { ThemeMode, ThemeSettingsButton } from './ThemeSettingsButton';
 
 interface SidebarNavProps {
   activeTab: NavKey;
+  language: LanguageMode;
+  theme: ThemeMode;
+  fullDemoBusy: boolean;
+  fullDemoMessage: string | null;
+  onLanguageChange: (language: LanguageMode) => void;
+  onRunFullDemo: () => Promise<void>;
   onSelect: (tab: NavKey) => void;
+  onThemeChange: (theme: ThemeMode) => void;
 }
 
 const navItems: Array<{
@@ -18,7 +28,18 @@ const navItems: Array<{
   { key: 'settings', label: 'Settings', Icon: SettingsIcon }
 ];
 
-export const SidebarNav = ({ activeTab, onSelect }: SidebarNavProps) => {
+export const SidebarNav = ({
+  activeTab,
+  language,
+  theme,
+  fullDemoBusy,
+  fullDemoMessage,
+  onLanguageChange,
+  onRunFullDemo,
+  onSelect,
+  onThemeChange
+}: SidebarNavProps) => {
+  const copy = shellCopy[language];
   return (
     <aside className="theme-sidebar relative z-20 border-b backdrop-blur-xl md:fixed md:inset-y-0 md:left-0 md:w-72 md:border-b-0 md:border-r">
       <div className="flex h-full flex-col px-4 py-5 md:px-6 md:py-8">
@@ -28,15 +49,16 @@ export const SidebarNav = ({ activeTab, onSelect }: SidebarNavProps) => {
           </div>
           <div>
             <p className="theme-sidebar-brand text-xs font-semibold uppercase tracking-[0.28em]">
-              Command Mesh
+              {copy.brandEyebrow}
             </p>
-            <h1 className="theme-title text-xl font-semibold">Ops Dashboard</h1>
+            <h1 className="theme-title text-xl font-semibold">{copy.brandTitle}</h1>
           </div>
         </div>
 
         <nav className="flex flex-row gap-2 overflow-x-auto pb-2 md:flex-col md:overflow-visible">
           {navItems.map(({ key, label, Icon }) => {
             const isActive = key === activeTab;
+            const navCopy = copy.nav[key];
 
             return (
               <button
@@ -61,39 +83,44 @@ export const SidebarNav = ({ activeTab, onSelect }: SidebarNavProps) => {
                   <Icon />
                 </span>
                 <span className="flex flex-col">
-                  <span className="text-sm font-medium">{label}</span>
-                  <span className="theme-muted text-xs">
-                    {key === 'overview' && 'Mission overview'}
-                    {key === 'agents' && 'Roster and health'}
-                    {key === 'network' && 'Topology traffic'}
-                    {key === 'control' && 'Operator actions'}
-                    {key === 'settings' && 'Policy controls'}
-                  </span>
+                  <span className="text-sm font-medium">{navCopy.label}</span>
+                  <span className="theme-muted text-xs">{navCopy.detail}</span>
                 </span>
               </button>
             );
           })}
         </nav>
 
-        <div className="theme-sidebar-note mt-6 hidden rounded-3xl border p-5 md:block">
-          <p className="text-xs font-semibold uppercase tracking-[0.24em]">
-            Live Snapshot
-          </p>
-          <div className="theme-copy mt-4 space-y-3 text-sm">
-            <div className="flex items-center justify-between">
-              <span>Mesh integrity</span>
-              <span className="theme-badge-emerald rounded-full px-2.5 py-1 text-xs font-semibold">
-                98.7%
+        <div className="mt-auto hidden pt-6 md:block">
+          <button
+            type="button"
+            onClick={() => {
+              void onRunFullDemo();
+            }}
+            disabled={fullDemoBusy}
+            className={[
+              'theme-top-button w-full justify-start px-4 py-3',
+              fullDemoBusy ? 'cursor-wait opacity-70' : ''
+            ].join(' ')}
+          >
+            <span className="theme-accent-icon flex h-10 w-10 items-center justify-center rounded-2xl">
+              <SignalIcon />
+            </span>
+            <span className="flex min-w-0 flex-col">
+              <span className="text-sm font-medium">{copy.demoAction.label}</span>
+              <span className="theme-muted text-xs">
+                {fullDemoBusy ? copy.demoAction.running : copy.demoAction.detail}
               </span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>Alarm window</span>
-              <span className="theme-title">03 active</span>
-            </div>
-            <div className="flex items-center justify-between">
-              <span>Global sync</span>
-              <span className="theme-title">09:26 UTC</span>
-            </div>
+            </span>
+          </button>
+
+          <p className="theme-soft mt-3 min-h-[2.5rem] px-1 text-xs leading-5">
+            {fullDemoMessage || copy.demoAction.ready}
+          </p>
+
+          <div className="pt-3 md:flex md:items-center md:gap-3">
+            <ThemeSettingsButton theme={theme} language={language} onThemeChange={onThemeChange} />
+            <LanguageSettingsButton language={language} onLanguageChange={onLanguageChange} />
           </div>
         </div>
       </div>

@@ -1,0 +1,107 @@
+- generic [ref=e4]:
+  - complementary [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]:
+        - img [ref=e9]
+        - generic [ref=e14]:
+          - paragraph [ref=e15]: Command Mesh
+          - heading "Ops Dashboard" [level=1] [ref=e16]
+      - navigation [ref=e17]:
+        - button "Overview Mission overview" [ref=e18] [cursor=pointer]:
+          - img [ref=e20]
+          - generic [ref=e25]:
+            - generic [ref=e26]: Overview
+            - generic [ref=e27]: Mission overview
+        - button "Agents Roster and health" [ref=e28] [cursor=pointer]:
+          - img [ref=e30]
+          - generic [ref=e33]:
+            - generic [ref=e34]: Agents
+            - generic [ref=e35]: Roster and health
+        - button "Network Topology traffic" [ref=e36] [cursor=pointer]:
+          - img [ref=e38]
+          - generic [ref=e44]:
+            - generic [ref=e45]: Network
+            - generic [ref=e46]: Topology traffic
+        - button "Control Operator actions" [ref=e47] [cursor=pointer]:
+          - img [ref=e49]
+          - generic [ref=e52]:
+            - generic [ref=e53]: Control
+            - generic [ref=e54]: Operator actions
+        - button "Settings Policy controls" [ref=e55] [cursor=pointer]:
+          - img [ref=e57]
+          - generic [ref=e60]:
+            - generic [ref=e61]: Settings
+            - generic [ref=e62]: Policy controls
+      - generic [ref=e63]:
+        - paragraph [ref=e64]: Live Snapshot
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - generic [ref=e67]: Mesh integrity
+            - generic [ref=e68]: 98.7%
+          - generic [ref=e69]:
+            - generic [ref=e70]: Alarm window
+            - generic [ref=e71]: 03 active
+          - generic [ref=e72]:
+            - generic [ref=e73]: Global sync
+            - generic [ref=e74]: 09:26 UTC
+      - generic [ref=e75]:
+        - button "Dark mode" [ref=e76] [cursor=pointer]:
+          - img [ref=e78]
+        - button "中文" [ref=e80] [cursor=pointer]:
+          - generic [ref=e81]: 中
+  - main [ref=e82]:
+    - generic [ref=e83]:
+      - generic [ref=e84]:
+        - generic [ref=e85]:
+          - paragraph [ref=e86]: Mission Control Dashboard
+          - heading "Operational Overview" [level=2] [ref=e87]
+          - paragraph [ref=e88]: A single-screen command view for live latency, active agents, route health, and critical operator messages.
+          - generic [ref=e89]:
+            - generic [ref=e90]: WebSocket live
+            - generic [ref=e91]: Loading API snapshot
+        - generic [ref=e93]:
+          - generic [ref=e94]:
+            - paragraph [ref=e95]: Online
+            - paragraph [ref=e96]: "0"
+          - generic [ref=e97]:
+            - paragraph [ref=e98]: Busy
+            - paragraph [ref=e99]: "0"
+          - generic [ref=e100]:
+            - paragraph [ref=e101]: Offline
+            - paragraph [ref=e102]: "0"
+      - generic [ref=e104]:
+        - generic [ref=e106]:
+          - paragraph [ref=e107]: Infrastructure
+          - heading "Network Element Status" [level=2] [ref=e108]
+          - paragraph [ref=e109]: "Live reachability for the core services behind the ACN workflow: ACN Agent, AgentGW, Relay, and IDM."
+        - generic [ref=e112]:
+          - generic [ref=e113]:
+            - generic [ref=e114]:
+              - paragraph [ref=e115]: Topology Map
+              - heading "React Flow Message Paths" [level=2] [ref=e116]
+              - paragraph [ref=e117]: Recent pipeline logs are aggregated into live paths between ACN Agent, AgentGW, IDM, and ACN SDK.
+            - generic [ref=e118]:
+              - button "Run Test Flow" [ref=e119] [cursor=pointer]:
+                - img [ref=e121]
+                - text: Run Test Flow
+              - generic [ref=e122]: 0 active routes
+              - generic [ref=e123]: 0 recent messages
+          - application [ref=e125]:
+            - generic "Control Panel" [ref=e128]:
+              - button "Zoom In" [ref=e129] [cursor=pointer]:
+                - img [ref=e130]
+              - button "Zoom Out" [ref=e132] [cursor=pointer]:
+                - img [ref=e133]
+              - button "Fit View" [ref=e135] [cursor=pointer]:
+                - img [ref=e136]
+              - button "Toggle Interactivity" [ref=e138] [cursor=pointer]:
+                - img [ref=e139]
+            - img
+        - generic [ref=e143]:
+          - generic [ref=e144]:
+            - generic [ref=e145]:
+              - paragraph [ref=e146]: Critical Messages Feed
+              - heading "System Events & Notifications" [level=2] [ref=e147]
+            - generic [ref=e148]: 0 recent events
+          - generic [ref=e149]:
+            - list

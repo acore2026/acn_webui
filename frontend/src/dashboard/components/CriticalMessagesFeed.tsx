@@ -1,8 +1,10 @@
 import { MessageFeedItem } from '../types';
+import { LanguageMode } from '../i18n';
 import { ErrorIcon, InfoIcon, WarningIcon } from './icons';
 
 interface CriticalMessagesFeedProps {
   messages: MessageFeedItem[];
+  language: LanguageMode;
 }
 
 const levelMap = {
@@ -26,16 +28,17 @@ const levelMap = {
   }
 };
 
-export const CriticalMessagesFeed = ({ messages }: CriticalMessagesFeedProps) => {
+export const CriticalMessagesFeed = ({ messages, language }: CriticalMessagesFeedProps) => {
+  const isZh = language === 'zh';
   return (
     <section className="glass-panel flex h-full flex-col overflow-hidden">
       <header className="flex items-center justify-between border-b border-[color:var(--border-soft)] px-6 py-5">
         <div>
-          <p className="panel-eyebrow">Critical Messages Feed</p>
-          <h2 className="theme-title mt-2 text-2xl font-semibold">System Events & Notifications</h2>
+          <p className="panel-eyebrow">{isZh ? '关键消息流' : 'Critical Messages Feed'}</p>
+          <h2 className="theme-title mt-2 text-2xl font-semibold">{isZh ? '系统事件与通知' : 'System Events & Notifications'}</h2>
         </div>
         <span className="theme-chip px-3 py-1 text-xs font-medium">
-          {messages.length} recent events
+          {isZh ? `最近 ${messages.length} 条事件` : `${messages.length} recent events`}
         </span>
       </header>
 
@@ -58,7 +61,7 @@ export const CriticalMessagesFeed = ({ messages }: CriticalMessagesFeedProps) =>
                     <div className="flex flex-wrap items-center gap-3">
                       <h3 className="theme-title text-base font-semibold">{message.title}</h3>
                       <span className={`rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.2em] ${level.badge}`}>
-                        {message.level}
+                        {isZh ? (message.level === 'info' ? '信息' : message.level === 'warning' ? '警告' : '错误') : message.level}
                       </span>
                     </div>
                     <p className="theme-copy mt-2 text-sm leading-6">{message.message}</p>

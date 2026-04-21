@@ -189,6 +189,23 @@ export const BotIcon = ({ className = '', ...props }: IconProps) => (
   </svg>
 );
 
+export const SdkIcon = ({ className = '', ...props }: IconProps) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    className={`${iconClass} ${className}`}
+    {...props}
+  >
+    <rect x="4" y="5" width="16" height="11" rx="2.5" />
+    <path d="M9 19h6" />
+    <path d="M12 16v3" />
+    <path d="m9 11 2-2-2-2" />
+    <path d="m15 11-2-2 2-2" />
+  </svg>
+);
+
 export const SunIcon = ({ className = '', ...props }: IconProps) => (
   <svg
     viewBox="0 0 24 24"
@@ -220,6 +237,25 @@ export const MoonIcon = ({ className = '', ...props }: IconProps) => (
     {...props}
   >
     <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+  </svg>
+);
+
+export const LanguageIcon = ({ className = '', ...props }: IconProps) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    className={`${iconClass} ${className}`}
+    {...props}
+  >
+    <path d="M4 6h10" />
+    <path d="M9 4v2c0 4.2-1.8 8.1-5 10.8" />
+    <path d="M6.5 11.5c1.1 1.5 2.5 2.9 4.2 4" />
+    <path d="M14 8h6" />
+    <path d="m17 6 3 10" />
+    <path d="m20 16-6 0" />
+    <path d="m15 16 2-6" />
   </svg>
 );
 

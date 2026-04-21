@@ -1,0 +1,216 @@
+- generic [ref=e4]:
+  - complementary [ref=e5]:
+    - generic [ref=e6]:
+      - generic [ref=e7]:
+        - img [ref=e9]
+        - generic [ref=e14]:
+          - paragraph [ref=e15]: Command Mesh
+          - heading "Ops Dashboard" [level=1] [ref=e16]
+      - navigation [ref=e17]:
+        - button "Overview Mission overview" [ref=e18] [cursor=pointer]:
+          - img [ref=e20]
+          - generic [ref=e25]:
+            - generic [ref=e26]: Overview
+            - generic [ref=e27]: Mission overview
+        - button "Agents Roster and health" [ref=e28] [cursor=pointer]:
+          - img [ref=e30]
+          - generic [ref=e33]:
+            - generic [ref=e34]: Agents
+            - generic [ref=e35]: Roster and health
+        - button "Network Topology traffic" [ref=e36] [cursor=pointer]:
+          - img [ref=e38]
+          - generic [ref=e44]:
+            - generic [ref=e45]: Network
+            - generic [ref=e46]: Topology traffic
+        - button "Control Operator actions" [ref=e47] [cursor=pointer]:
+          - img [ref=e49]
+          - generic [ref=e52]:
+            - generic [ref=e53]: Control
+            - generic [ref=e54]: Operator actions
+        - button "Settings Policy controls" [ref=e55] [cursor=pointer]:
+          - img [ref=e57]
+          - generic [ref=e60]:
+            - generic [ref=e61]: Settings
+            - generic [ref=e62]: Policy controls
+      - generic [ref=e63]:
+        - paragraph [ref=e64]: Live Snapshot
+        - generic [ref=e65]:
+          - generic [ref=e66]:
+            - generic [ref=e67]: Mesh integrity
+            - generic [ref=e68]: 98.7%
+          - generic [ref=e69]:
+            - generic [ref=e70]: Alarm window
+            - generic [ref=e71]: 03 active
+          - generic [ref=e72]:
+            - generic [ref=e73]: Global sync
+            - generic [ref=e74]: 09:26 UTC
+  - main [ref=e75]:
+    - generic [ref=e76]:
+      - generic [ref=e77]:
+        - generic [ref=e78]:
+          - paragraph [ref=e79]: Mission Control Dashboard
+          - heading "Operational Overview" [level=2] [ref=e80]
+          - paragraph [ref=e81]: A single-screen command view for live latency, active agents, route health, and critical operator messages.
+          - generic [ref=e82]:
+            - generic [ref=e83]: WebSocket live
+            - generic [ref=e84]: API snapshot connected
+        - generic [ref=e85]:
+          - button "Appearance Dark mode enabled" [ref=e87] [cursor=pointer]:
+            - img [ref=e89]
+            - generic [ref=e92]:
+              - generic [ref=e93]: Appearance
+              - generic [ref=e94]: Dark mode enabled
+            - img [ref=e95]
+          - generic [ref=e97]:
+            - generic [ref=e98]:
+              - paragraph [ref=e99]: Online
+              - paragraph [ref=e100]: "0"
+            - generic [ref=e101]:
+              - paragraph [ref=e102]: Busy
+              - paragraph [ref=e103]: "0"
+            - generic [ref=e104]:
+              - paragraph [ref=e105]: Offline
+              - paragraph [ref=e106]: "0"
+      - generic [ref=e108]:
+        - generic [ref=e153]:
+          - article [ref=e154]:
+            - generic [ref=e156]:
+              - generic [ref=e157]:
+                - paragraph [ref=e158]: System Latency
+                - heading "0ms" [level=3] [ref=e160]
+              - img [ref=e163]
+            - paragraph [ref=e165]: Average active link latency from current backend mesh state.
+            - generic [ref=e166]: Waiting for active routes
+          - article [ref=e167]:
+            - generic [ref=e169]:
+              - generic [ref=e170]:
+                - paragraph [ref=e171]: Active Agents
+                - heading "0 / 0" [level=3] [ref=e173]
+              - img [ref=e176]
+            - paragraph [ref=e177]: Live agent roster derived from the backend database and in-memory status cache.
+            - generic [ref=e178]: 0 busy, 0 warning messages
+          - article [ref=e179]:
+            - generic [ref=e181]:
+              - generic [ref=e182]:
+                - paragraph [ref=e183]: Running Tasks
+                - heading "0" [level=3] [ref=e185]
+              - img [ref=e188]
+            - paragraph [ref=e191]: Current workload count backed by the tasks table and active agent state.
+            - generic [ref=e192]: 0 agents currently busy
+        - generic [ref=e109]:
+          - generic [ref=e110]:
+            - paragraph [ref=e111]: Infrastructure
+            - heading "Network Element Status" [level=2] [ref=e112]
+            - paragraph [ref=e113]: "Live reachability for the core services behind the ACN workflow: ACN Agent, AgentGW, Relay, and IDM."
+          - generic [ref=e193]:
+            - article [ref=e194]:
+              - generic [ref=e195]:
+                - generic [ref=e196]:
+                  - img [ref=e198]
+                  - generic [ref=e200]:
+                    - heading "ACN Agent" [level=3] [ref=e201]
+                    - paragraph [ref=e202]: All 1 endpoints are reachable.
+                - generic [ref=e203]: online
+              - generic [ref=e205]:
+                - generic [ref=e206]:
+                  - paragraph [ref=e207]: ACN Agent
+                  - paragraph [ref=e208]: HTTP port 9010
+                  - paragraph [ref=e209]: Task execution runtime exposed by the ACN Agent service.
+                - generic [ref=e210]: online
+            - article [ref=e211]:
+              - generic [ref=e212]:
+                - generic [ref=e213]:
+                  - img [ref=e215]
+                  - generic [ref=e221]:
+                    - heading "AgentGW" [level=3] [ref=e222]
+                    - paragraph [ref=e223]: All 3 endpoints are reachable.
+                - generic [ref=e224]: online
+              - generic [ref=e225]:
+                - generic [ref=e226]:
+                  - generic [ref=e227]:
+                    - paragraph [ref=e228]: ARF
+                    - paragraph [ref=e229]: HTTP port 9001
+                    - paragraph [ref=e230]: Agent Repository Function for registration and discovery.
+                  - generic [ref=e231]: online
+                - generic [ref=e232]:
+                  - generic [ref=e233]:
+                    - paragraph [ref=e234]: ACF
+                    - paragraph [ref=e235]: WS port 9002
+                    - paragraph [ref=e236]: Agent Communication Function for WebSocket coordination.
+                  - generic [ref=e237]: online
+                - generic [ref=e238]:
+                  - generic [ref=e239]:
+                    - paragraph [ref=e240]: Relay
+                    - paragraph [ref=e241]: UDP port 9003
+                    - paragraph [ref=e242]: MOQ relay over QUIC for track distribution.
+                  - generic [ref=e243]: online
+            - article [ref=e244]:
+              - generic [ref=e245]:
+                - generic [ref=e246]:
+                  - img [ref=e248]
+                  - generic [ref=e251]:
+                    - heading "IDM" [level=3] [ref=e252]
+                    - paragraph [ref=e253]: All 1 endpoints are reachable.
+                - generic [ref=e254]: online
+              - generic [ref=e256]:
+                - generic [ref=e257]:
+                  - paragraph [ref=e258]: IDM
+                  - paragraph [ref=e259]: HTTP port 9020
+                  - paragraph [ref=e260]: Identity verification service used for VC checks.
+                - generic [ref=e261]: online
+        - generic [ref=e116]:
+          - generic [ref=e117]:
+            - generic [ref=e118]:
+              - paragraph [ref=e119]: Topology Map
+              - heading "React Flow Message Paths" [level=2] [ref=e120]
+              - paragraph [ref=e121]: Recent pipeline logs are aggregated into live paths between ACN Agent, AgentGW, and IDM.
+            - generic [ref=e122]:
+              - generic [ref=e123]: 0 active routes
+              - generic [ref=e124]: 0 recent messages
+          - application [ref=e126]:
+            - generic [ref=e128]:
+              - generic:
+                - generic:
+                  - group [ref=e262]:
+                    - generic [ref=e263]:
+                      - generic [ref=e266]:
+                        - img [ref=e268]
+                        - generic [ref=e270]: online
+                      - generic [ref=e272]:
+                        - heading "ACN Agent" [level=4] [ref=e273]
+                        - paragraph [ref=e274]: Execution runtime and agent-side requests
+                  - group [ref=e275]:
+                    - generic [ref=e276]:
+                      - generic [ref=e279]:
+                        - img [ref=e281]
+                        - generic [ref=e287]: online
+                      - generic [ref=e289]:
+                        - heading "AgentGW" [level=4] [ref=e290]
+                        - paragraph [ref=e291]: ARF and ACF coordination hub
+                  - group [ref=e292]:
+                    - generic [ref=e293]:
+                      - generic [ref=e296]:
+                        - img [ref=e298]
+                        - generic [ref=e301]: online
+                      - generic [ref=e303]:
+                        - heading "IDM" [level=4] [ref=e304]
+                        - paragraph [ref=e305]: Identity verification service
+            - img "Mini Map" [ref=e130]
+            - generic "Control Panel" [ref=e131]:
+              - button "Zoom In" [ref=e132] [cursor=pointer]:
+                - img [ref=e133]
+              - button "Zoom Out" [ref=e135] [cursor=pointer]:
+                - img [ref=e136]
+              - button "Fit View" [ref=e138] [cursor=pointer]:
+                - img [ref=e139]
+              - button "Toggle Interactivity" [ref=e141] [cursor=pointer]:
+                - img [ref=e142]
+            - img
+        - generic [ref=e146]:
+          - generic [ref=e147]:
+            - generic [ref=e148]:
+              - paragraph [ref=e149]: Critical Messages Feed
+              - heading "System Events & Notifications" [level=2] [ref=e150]
+            - generic [ref=e151]: 0 recent events
+          - generic [ref=e152]:
+            - list

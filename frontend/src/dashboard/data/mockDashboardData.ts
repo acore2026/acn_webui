@@ -27,6 +27,132 @@ export const dashboardMockData: DashboardMockData = {
       trend: "17 escalated workflows"
     }
   ],
+  elements: [
+    {
+      id: "acn-agent",
+      name: "ACN Agent",
+      status: "online",
+      summary: "Task execution runtime is reachable.",
+      components: [
+        {
+          id: "acn-agent-runtime",
+          name: "ACN Agent",
+          port: 9010,
+          protocol: "http",
+          status: "online",
+          description: "Task execution runtime exposed by the ACN Agent service."
+        }
+      ]
+    },
+    {
+      id: "agent-gw",
+      name: "AgentGW",
+      status: "degraded",
+      summary: "2 of 3 endpoints are reachable.",
+      components: [
+        {
+          id: "arf",
+          name: "ARF",
+          port: 9001,
+          protocol: "http",
+          status: "online",
+          description: "Agent Repository Function for registration and discovery."
+        },
+        {
+          id: "acf",
+          name: "ACF",
+          port: 9002,
+          protocol: "ws",
+          status: "online",
+          description: "Agent Communication Function for WebSocket coordination."
+        },
+        {
+          id: "relay",
+          name: "Relay",
+          port: 9003,
+          protocol: "udp",
+          status: "offline",
+          description: "MOQ relay over QUIC for track distribution."
+        }
+      ]
+    },
+    {
+      id: "idm",
+      name: "IDM",
+      status: "online",
+      summary: "Identity verification service is reachable.",
+      components: [
+        {
+          id: "idm-runtime",
+          name: "IDM",
+          port: 9020,
+          protocol: "http",
+          status: "online",
+          description: "Identity verification service used for VC checks."
+        }
+      ]
+    }
+  ],
+  messageFlow: {
+    nodes: [
+      {
+        id: "ACN Agent",
+        name: "ACN Agent",
+        status: "online",
+        position: { x: 120, y: 200 }
+      },
+      {
+        id: "AgentGW",
+        name: "AgentGW",
+        status: "online",
+        position: { x: 500, y: 200 }
+      },
+      {
+        id: "IDM",
+        name: "IDM",
+        status: "online",
+        position: { x: 880, y: 200 }
+      }
+    ],
+    edges: [
+      {
+        id: "ACN Agent-AgentGW",
+        source: "ACN Agent",
+        target: "AgentGW",
+        count: 4,
+        lastMessage: "Register agent identity",
+        lastTimestamp: "2026-04-20T09:26:02.000000",
+        active: true
+      },
+      {
+        id: "AgentGW-IDM",
+        source: "AgentGW",
+        target: "IDM",
+        count: 3,
+        lastMessage: "Apply for digital identity",
+        lastTimestamp: "2026-04-20T09:24:30.000000",
+        active: true
+      },
+      {
+        id: "IDM-AgentGW",
+        source: "IDM",
+        target: "AgentGW",
+        count: 2,
+        lastMessage: "Identity verification completed",
+        lastTimestamp: "2026-04-20T09:22:11.000000",
+        active: true
+      },
+      {
+        id: "AgentGW-ACN Agent",
+        source: "AgentGW",
+        target: "ACN Agent",
+        count: 2,
+        lastMessage: "Capabilities registered",
+        lastTimestamp: "2026-04-20T09:19:55.000000",
+        active: true
+      }
+    ]
+  },
   topology: {
     agents: [
       {

@@ -1,10 +1,12 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
+import { LanguageMode } from '../i18n';
 import { TopologyAgentModel } from '../types';
 import { SectionCard } from '../components/SectionCard';
 
 interface AgentsPageProps {
   agents: TopologyAgentModel[];
+  language: LanguageMode;
 }
 
 const statusTone = {
@@ -13,8 +15,14 @@ const statusTone = {
   offline: 'theme-badge-rose'
 };
 
-export const AgentsPage = ({ agents }: AgentsPageProps) => {
+export const AgentsPage = ({ agents, language }: AgentsPageProps) => {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
+  const isZh = language === 'zh';
+  const statusLabel = {
+    online: isZh ? '在线' : 'online',
+    busy: isZh ? '忙碌' : 'busy',
+    offline: isZh ? '离线' : 'offline'
+  };
 
   useEffect(() => {
     if (selectedAgentId && !agents.some((agent) => agent.id === selectedAgentId)) {
@@ -47,7 +55,7 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
             <div
               role="dialog"
               aria-modal="true"
-              aria-label={`${selectedAgent.name} details`}
+              aria-label={`${selectedAgent.name} ${isZh ? '详情' : 'details'}`}
               className="glass-panel max-h-[85vh] w-full max-w-4xl overflow-y-auto p-6 md:p-7"
               onClick={(event) => event.stopPropagation()}
             >
@@ -57,15 +65,15 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
                   onClick={() => setSelectedAgentId('')}
                   className="theme-top-button absolute right-0 top-0 px-4 py-2"
                 >
-                  Close
+                  {isZh ? '关闭' : 'Close'}
                 </button>
 
                 <div>
-                  <p className="panel-eyebrow">Agent Detail</p>
+                  <p className="panel-eyebrow">{isZh ? '智能体详情' : 'Agent Detail'}</p>
                   <h3 className="theme-title mt-2 text-2xl font-semibold">{selectedAgent.name}</h3>
                   <div className="mt-3">
                     <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${statusTone[selectedAgent.status]}`}>
-                      {selectedAgent.status}
+                      {statusLabel[selectedAgent.status]}
                     </span>
                   </div>
                   <p className="theme-copy mt-2 max-w-3xl text-sm leading-6">{selectedAgent.summary}</p>
@@ -74,34 +82,34 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
 
               <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Role</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '角色' : 'Role'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.role}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Region</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '区域' : 'Region'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.region}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Throughput</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '吞吐量' : 'Throughput'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.throughput}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Running Tasks</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行中任务' : 'Running Tasks'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.taskCount}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Uptime</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行时长' : 'Uptime'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.uptime}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Last Heartbeat</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '最后心跳' : 'Last Heartbeat'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.lastHeartbeat}</dd>
                 </div>
               </div>
 
               <div className="mt-6 grid gap-4 lg:grid-cols-2">
                 <div>
-                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">Capabilities</h4>
+                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '能力标签' : 'Capabilities'}</h4>
                   <div className="mt-3 flex flex-wrap gap-2">
                     {selectedAgent.capabilities.map((capability) => (
                       <span
@@ -115,7 +123,7 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
                 </div>
 
                 <div>
-                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">Alerts & Notes</h4>
+                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '告警与备注' : 'Alerts & Notes'}</h4>
                   <ul className="mt-3 space-y-2">
                     {selectedAgent.alerts.map((alert) => (
                       <li key={alert} className="theme-subtle-card theme-copy px-4 py-3 text-sm leading-6">
@@ -133,9 +141,14 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
 
   return (
     <SectionCard
-      eyebrow="Agents"
-      title="Fleet Roster"
-      description="Click an agent card to open a dedicated detail window with its profile, health, capabilities, and task load."
+      id="agents-section"
+      eyebrow={isZh ? '智能体' : 'Agents'}
+      title={isZh ? '智能体名册' : 'Fleet Roster'}
+      description={
+        isZh
+          ? '点击任意智能体卡片即可打开专属详情窗口，查看其资料、健康状态、能力标签与任务负载。'
+          : 'Click an agent card to open a dedicated detail window with its profile, health, capabilities, and task load.'
+      }
     >
       <div className="grid gap-4 xl:grid-cols-2">
         {agents.map((agent) => (
@@ -161,16 +174,16 @@ export const AgentsPage = ({ agents }: AgentsPageProps) => {
                   <p className="theme-soft mt-1 text-sm">{agent.role}</p>
                 </div>
                 <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${statusTone[agent.status]}`}>
-                  {agent.status}
+                  {statusLabel[agent.status]}
                 </span>
               </div>
               <dl className="theme-copy mt-5 grid gap-3 text-sm sm:grid-cols-2">
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Region</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '区域' : 'Region'}</dt>
                   <dd className="theme-title mt-2 font-medium">{agent.region}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">Throughput</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '吞吐量' : 'Throughput'}</dt>
                   <dd className="theme-title mt-2 font-medium">{agent.throughput}</dd>
                 </div>
               </dl>

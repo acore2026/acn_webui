@@ -8,8 +8,12 @@ Port: 9005
 import asyncio
 import base64
 import json
+import socket
 import sqlite3
-from datetime import datetime, timezone
+import re
+from collections import deque
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -38,6 +42,89 @@ DB_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
 # ARF Service Configuration
 ARF_HOST = "localhost"  # ARF service host
 ARF_CLEAR_URL = f"http://{ARF_HOST}:9001/clear"
+LOCAL_STATUS_HOST = "127.0.0.1"
+AGENT_GW_LOG_DIR = Path("/home/acn/zqm/acn_gw/agent_gw/logs")
+IDM_LOG_DIR = Path("/home/acn/cx/idm/logs")
+ACN_AGENT_LOG_FILE = Path("/home/acn/cxr/acn_agent/.acn_agent.log")
+
+ELEMENT_PORTS = [
+    {
+        "id": "acn-agent",
+        "label": "ACN Agent",
+        "port": 9010,
+        "protocol": "http",
+        "group": "acn-agent",
+        "group_label": "ACN Agent",
+        "description": "Task execution runtime exposed by the ACN Agent service.",
+    },
+    {
+        "id": "arf",
+        "label": "ARF",
+        "port": 9001,
+        "protocol": "http",
+        "group": "agent-gw",
+        "group_label": "AgentGW",
+        "description": "Agent Repository Function for registration and discovery.",
+    },
+    {
+        "id": "acf",
+        "label": "ACF",
+        "port": 9002,
+        "protocol": "ws",
+        "group": "agent-gw",
+        "group_label": "AgentGW",
+        "description": "Agent Communication Function for WebSocket coordination.",
+    },
+    {
+        "id": "relay",
+        "label": "Relay",
+        "port": 9003,
+        "protocol": "udp",
+        "group": "agent-gw",
+        "group_label": "AgentGW",
+        "description": "MOQ relay over QUIC for track distribution.",
+    },
+    {
+        "id": "idm",
+        "label": "IDM",
+        "port": 9020,
+        "protocol": "http",
+        "group": "idm",
+        "group_label": "IDM",
+        "description": "Identity verification service used for VC checks.",
+    },
+]
+
+FLOW_NODE_LAYOUTS = {
+    "ACN Agent": {"x": 100, "y": 210},
+    "IDM": {"x": 510, "y": 60},
+    "AgentGW": {"x": 920, "y": 210},
+    "ACN SDK": {"x": 510, "y": 360},
+}
+
+MESSAGE_FLOW_TTL_SECONDS = 1
+MESSAGE_FLOW_ACTIVE_SECONDS = 1
+
+NETWORK_ELEMENT_LOG_SOURCES = [
+    {
+        "id": "acn-agent",
+        "name": "ACN Agent",
+        "mode": "file",
+        "path": ACN_AGENT_LOG_FILE,
+    },
+    {
+        "id": "agent-gw",
+        "name": "AgentGW",
+        "mode": "all-logs",
+        "path": AGENT_GW_LOG_DIR,
+    },
+    {
+        "id": "idm",
+        "name": "IDM",
+        "mode": "latest-log",
+        "path": IDM_LOG_DIR,
+    },
+]
 
 
 # WebSocket connection manager
@@ -147,6 +234,176 @@ def get_task_count_from_db() -> int:
     except Exception as e:
         print(f"[Task Count Error] {e}")
         return 0
+
+
+def get_tasks_from_db() -> List[Dict[str, Any]]:
+    """Get active tasks grouped by task_id from database."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, agent_id, task_id, task_description
+            FROM tasks
+            ORDER BY id DESC
+            """
+        )
+        rows = cursor.fetchall()
+        conn.close()
+
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for row in rows:
+            entry = dict(row)
+            task_id = str(entry.get("task_id") or f"task-{entry.get('id')}")
+            task = grouped.setdefault(
+                task_id,
+                {
+                    "id": task_id,
+                    "description": entry.get("task_description") or "",
+                    "agent_ids": [],
+                },
+            )
+            agent_id = entry.get("agent_id")
+            if agent_id and agent_id not in task["agent_ids"]:
+                task["agent_ids"].append(agent_id)
+            if not task["description"] and entry.get("task_description"):
+                task["description"] = entry["task_description"]
+
+        return list(grouped.values())
+    except Exception as e:
+        print(f"[Task Query Error] {e}")
+        return []
+
+
+def _extract_task_type(description: str) -> Optional[str]:
+    if not description:
+        return None
+
+    prefix, separator, _ = description.partition(":")
+    if separator and len(prefix) <= 40:
+        return prefix.strip()
+
+    return None
+
+
+def _task_agent_name_lookup() -> Dict[str, str]:
+    lookup = {
+        str(agent.get("agent_id")): str(agent.get("agent_name") or agent.get("agent_id"))
+        for agent in get_agents_from_db()
+    }
+
+    for agent_id, cached in agent_status_cache.items():
+        value = str(cached.get("agent_name") or agent_id)
+        if cached.get("is_demo"):
+            lookup.setdefault(str(agent_id), value)
+
+    return lookup
+
+
+def _build_task_involved_agents(
+    agent_ids: List[str],
+    name_lookup: Dict[str, str],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, str]]:
+    agent_names = metadata.get("agent_names", {}) if metadata else {}
+    involved_agents = []
+
+    for agent_id in agent_ids:
+        name = (
+            agent_names.get(agent_id)
+            or agent_status_cache.get(agent_id, {}).get("agent_name")
+            or name_lookup.get(agent_id, agent_id)
+        )
+        involved_agents.append({"id": agent_id, "name": str(name)})
+
+    return involved_agents
+
+
+def build_control_tasks_snapshot(limit_finished: int = 20) -> List[Dict[str, Any]]:
+    """Return active DB tasks plus recently finished control tasks."""
+    name_lookup = _task_agent_name_lookup()
+    active_tasks = []
+    seen_task_ids = set()
+
+    for task in get_tasks_from_db():
+        task_id = str(task["id"])
+        metadata = task_control_registry.get(task_id, {})
+        description = str(
+            task.get("description")
+            or metadata.get("task_description")
+            or "No description provided."
+        )
+        task_type = str(
+            metadata.get("task_type")
+            or _extract_task_type(description)
+            or "General"
+        )
+        created_at = str(
+            metadata.get("created_at")
+            or metadata.get("updated_at")
+            or datetime.utcnow().isoformat()
+        )
+        updated_at = str(metadata.get("updated_at") or created_at)
+
+        active_tasks.append(
+            {
+                "id": task_id,
+                "taskName": str(
+                    metadata.get("task_name") or task_type or f"Task {task_id[-6:]}"
+                ),
+                "taskType": task_type,
+                "description": description,
+                "status": "processing",
+                "involvedAgents": _build_task_involved_agents(
+                    task.get("agent_ids", []), name_lookup, metadata
+                ),
+                "createdAt": created_at,
+                "updatedAt": updated_at,
+            }
+        )
+        seen_task_ids.add(task_id)
+
+    for task_id, metadata in task_control_registry.items():
+        if task_id in seen_task_ids or metadata.get("status") != "processing":
+            continue
+
+        description = str(
+            metadata.get("task_description") or "No description provided."
+        )
+        task_type = str(
+            metadata.get("task_type")
+            or _extract_task_type(description)
+            or "General"
+        )
+        created_at = str(
+            metadata.get("created_at")
+            or metadata.get("updated_at")
+            or datetime.utcnow().isoformat()
+        )
+        updated_at = str(metadata.get("updated_at") or created_at)
+        agent_ids = [str(agent_id) for agent_id in metadata.get("agent_ids", []) if agent_id]
+
+        active_tasks.append(
+            {
+                "id": str(task_id),
+                "taskName": str(
+                    metadata.get("task_name") or task_type or f"Task {str(task_id)[-6:]}"
+                ),
+                "taskType": task_type,
+                "description": description,
+                "status": "processing",
+                "involvedAgents": _build_task_involved_agents(
+                    agent_ids, name_lookup, metadata
+                ),
+                "createdAt": created_at,
+                "updatedAt": updated_at,
+            }
+        )
+
+    active_tasks.sort(key=lambda item: item["updatedAt"], reverse=True)
+    finished_tasks = list(reversed(control_task_history[-limit_finished:]))
+    return active_tasks + finished_tasks
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:
@@ -272,6 +529,194 @@ def _dashboard_alerts_from_agent(agent: Dict[str, Any]) -> List[str]:
     return notes[:3]
 
 
+def _is_port_open(port: int, protocol: str = "tcp") -> bool:
+    if protocol == "udp":
+        hex_port = f"{port:04X}"
+        for proc_path in ("/proc/net/udp", "/proc/net/udp6"):
+            try:
+                with open(proc_path, "r", encoding="utf-8") as handle:
+                    lines = handle.readlines()[1:]
+            except OSError:
+                continue
+
+            for line in lines:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                local_address = parts[1]
+                if ":" not in local_address:
+                    continue
+                _, local_port = local_address.rsplit(":", 1)
+                if local_port.upper() == hex_port:
+                    return True
+        return False
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.35)
+
+    try:
+        return sock.connect_ex((LOCAL_STATUS_HOST, port)) == 0
+    except Exception:
+        return False
+    finally:
+        sock.close()
+
+
+def build_element_status_snapshot() -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+
+    for element in ELEMENT_PORTS:
+        status = "online" if _is_port_open(element["port"], element["protocol"]) else "offline"
+        group = grouped.setdefault(
+            element["group"],
+            {
+                "id": element["group"],
+                "name": element["group_label"],
+                "status": "online",
+                "summary": "",
+                "components": [],
+            },
+        )
+
+        group["components"].append(
+            {
+                "id": element["id"],
+                "name": element["label"],
+                "port": element["port"],
+                "protocol": element["protocol"],
+                "status": status,
+                "description": element["description"],
+            }
+        )
+
+    snapshots: List[Dict[str, Any]] = []
+    for group in grouped.values():
+        components = group["components"]
+        online_count = sum(1 for component in components if component["status"] == "online")
+        total_count = len(components)
+
+        if online_count == total_count:
+            group_status = "online"
+            summary = f"All {total_count} endpoints are reachable."
+        elif online_count == 0:
+            group_status = "offline"
+            summary = "No endpoints are reachable."
+        else:
+            group_status = "degraded"
+            summary = f"{online_count} of {total_count} endpoints are reachable."
+
+        group["status"] = group_status
+        group["summary"] = summary
+        snapshots.append(group)
+
+    return sorted(snapshots, key=lambda item: item["name"])
+
+
+def _canonical_flow_node(name: str) -> Optional[str]:
+    normalized = (name or "").strip().lower()
+    if not normalized:
+        return None
+
+    if "acn sdk" in normalized or normalized == "sdk":
+        return "ACN SDK"
+
+    if "idm" in normalized:
+        return "IDM"
+
+    if (
+        "agent gw" in normalized
+        or "agentgw" in normalized
+        or normalized == "arf"
+        or normalized == "acf"
+        or "/arf/" in normalized
+        or "/acf/" in normalized
+    ):
+        return "AgentGW"
+
+    if (
+        "acn agent" in normalized
+        or normalized.startswith("did:acn:agent:")
+        or normalized.startswith("did:udid:")
+        or "agent card" in normalized
+        or "identity application" in normalized
+    ):
+        return "ACN Agent"
+
+    return None
+
+
+def build_message_flow_snapshot(
+    elements: Optional[List[Dict[str, Any]]] = None, limit: int = 20
+) -> Dict[str, Any]:
+    element_status_map = {}
+    for element in elements or []:
+        name = str(element.get("name", "")).strip()
+        status = str(element.get("status", "offline")).lower()
+        if name:
+            element_status_map[name] = "offline" if status == "offline" else "online"
+
+    recent_events = list(reversed(pipeline_log_buffer[-limit:])) if pipeline_log_buffer else []
+    edge_map: Dict[tuple, Dict[str, Any]] = {}
+    now = datetime.utcnow()
+
+    for event in recent_events:
+        timestamp = _parse_timestamp(event.get("timestamp"))
+        if not timestamp:
+            continue
+
+        age_seconds = (now - timestamp).total_seconds()
+        if age_seconds < 0 or age_seconds > MESSAGE_FLOW_TTL_SECONDS:
+            continue
+
+        source = _canonical_flow_node(str(event.get("source", "")))
+        target = _canonical_flow_node(str(event.get("destination", "")))
+        if not source or not target or source == target:
+            continue
+
+        key = (source, target)
+        abstract = str(event.get("abstract", "")).strip() or str(event.get("content", "")).strip() or "Message flow"
+        if "响应返回" in abstract:
+            continue
+        entry = edge_map.get(key)
+        if entry is None:
+            edge_map[key] = {
+                "id": f"{source}-{target}",
+                "source": source,
+                "target": target,
+                "count": 1,
+                "lastMessage": abstract[:96],
+                "lastTimestamp": event.get("timestamp"),
+                "active": age_seconds <= MESSAGE_FLOW_ACTIVE_SECONDS,
+            }
+        else:
+            entry["count"] += 1
+            if not entry.get("lastMessage"):
+                entry["lastMessage"] = abstract[:96]
+            if not entry.get("lastTimestamp"):
+                entry["lastTimestamp"] = event.get("timestamp")
+            entry["active"] = entry["active"] or age_seconds <= MESSAGE_FLOW_ACTIVE_SECONDS
+
+    nodes = []
+    for name, position in FLOW_NODE_LAYOUTS.items():
+        nodes.append(
+            {
+                "id": name,
+                "name": name,
+                "position": position,
+                "status": element_status_map.get(
+                    name, "online" if name == "ACN SDK" else "offline"
+                ),
+            }
+        )
+
+    edges = sorted(edge_map.values(), key=lambda item: (-item["count"], item["id"]))
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+    }
+
+
 def _merge_cached_agent_fields(
     base_agent: Dict[str, Any], cached_agent: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -301,6 +746,7 @@ def _merge_cached_agent_fields(
 
 def _merge_agent_sources() -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
+    seen_agent_ids = set()
 
     # The ARF/AgentGW database is the source of truth for which agents exist.
     # Runtime cache only enriches those agents with transient state.
@@ -320,6 +766,24 @@ def _merge_agent_sources() -> List[Dict[str, Any]]:
             combined["agent_capability"] = []
         if "agent_status" not in combined:
             combined["agent_status"] = "offline"
+        merged.append(combined)
+        seen_agent_ids.add(agent_id)
+
+    for agent_id, cached in agent_status_cache.items():
+        normalized_agent_id = str(agent_id).strip()
+        if (
+            not normalized_agent_id
+            or normalized_agent_id in seen_agent_ids
+            or not cached.get("is_demo")
+        ):
+            continue
+
+        combined = dict(cached)
+        combined["agent_id"] = normalized_agent_id
+        if "agent_capability" not in combined:
+            combined["agent_capability"] = []
+        if "agent_status" not in combined:
+            combined["agent_status"] = "online"
         merged.append(combined)
 
     return sorted(
@@ -452,7 +916,11 @@ def build_dashboard_metrics(
         round(sum(active_latencies) / len(active_latencies)) if active_latencies else 0
     )
     warning_messages = sum(1 for message in messages if message["level"] == "warning")
-    task_count = get_task_count_from_db() or busy_agents
+    task_count = sum(
+        1 for task in build_control_tasks_snapshot(limit_finished=0) if task["status"] == "processing"
+    )
+    if task_count == 0:
+        task_count = get_task_count_from_db() or busy_agents
 
     latency_tone = "healthy"
     if average_latency >= 50:
@@ -497,15 +965,493 @@ def build_dashboard_snapshot() -> Dict[str, Any]:
     links = build_dashboard_links(agents)
     messages = build_dashboard_messages()
     metrics = build_dashboard_metrics(agents, links, messages)
+    elements = build_element_status_snapshot()
+    message_flow = build_message_flow_snapshot(elements)
 
     return {
         "metrics": metrics,
+        "elements": elements,
+        "messageFlow": message_flow,
         "topology": {
             "agents": agents,
             "links": links,
         },
         "messages": messages,
         "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+def build_topology_test_messages() -> List[Dict[str, Any]]:
+    """Focused message-flow demo aligned with the Topology Map layout."""
+    now = datetime.utcnow()
+    return [
+        {
+            "source": "ACN SDK",
+            "destination": "ACN Agent",
+            "timestamp": now.isoformat(),
+            "task_id": "topology-identity",
+            "protocol": "HTTP/2",
+            "headers": "",
+            "abstract": "Register agent identity",
+            "content": "ACN SDK starts identity registration",
+        },
+        {
+            "source": "ACN Agent",
+            "destination": "IDM",
+            "timestamp": (now + timedelta(milliseconds=120)).isoformat(),
+            "task_id": "topology-identity",
+            "protocol": "HTTP/2",
+            "headers": "",
+            "abstract": "/idm/v1/identity-applications已转发到IDM",
+            "content": "ACN Agent forwards the identity application to IDM",
+        },
+        {
+            "source": "IDM",
+            "destination": "ACN SDK",
+            "timestamp": (now + timedelta(milliseconds=240)).isoformat(),
+            "task_id": "topology-identity",
+            "protocol": "HTTP/2",
+            "headers": "",
+            "abstract": "/idm/v1/identity-applications响应返回ACN SDK",
+            "content": "IDM returns the identity response to ACN SDK",
+        },
+        {
+            "source": "ACN Agent",
+            "destination": "AgentGW",
+            "timestamp": (now + timedelta(milliseconds=360)).isoformat(),
+            "task_id": "topology-card",
+            "protocol": "HTTP/2",
+            "headers": "",
+            "abstract": "/arf/v1/agent-cards已转发到AgentGW",
+            "content": "ACN Agent forwards the agent card to AgentGW",
+        },
+        {
+            "source": "AgentGW",
+            "destination": "ACN SDK",
+            "timestamp": (now + timedelta(milliseconds=480)).isoformat(),
+            "task_id": "topology-card",
+            "protocol": "HTTP/2",
+            "headers": "",
+            "abstract": "/arf/v1/agent-cards响应返回ACN SDK",
+            "content": "AgentGW returns the agent-card response to ACN SDK",
+        },
+    ]
+
+
+async def run_topology_test_demo(
+    rounds: int = 1, step_delay_seconds: float = 0.12
+) -> Dict[str, Any]:
+    """Inject a focused set of pipeline logs for Topology Map testing."""
+    total_messages = 0
+    normalized_rounds = max(1, rounds)
+    topology_test_runtime["running"] = True
+    topology_test_runtime["paused"] = False
+
+    try:
+        for round_index in range(normalized_rounds):
+            round_messages = build_topology_test_messages()
+            for message_index, message in enumerate(round_messages):
+                while topology_test_runtime["paused"]:
+                    await asyncio.sleep(0.1)
+
+                payload = dict(message)
+                payload["task_id"] = f"{message['task_id']}-r{round_index + 1}"
+                payload["timestamp"] = (
+                    datetime.utcnow() + timedelta(milliseconds=message_index * 120)
+                ).isoformat()
+                await receive_pipeline_log({"body": payload})
+                total_messages += 1
+                if message_index < len(round_messages) - 1:
+                    await asyncio.sleep(step_delay_seconds)
+    finally:
+        topology_test_runtime["running"] = False
+        topology_test_runtime["paused"] = False
+
+    dashboard = build_dashboard_snapshot()
+    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "rounds": normalized_rounds,
+        "messages_sent": total_messages,
+        "dashboard": dashboard,
+    }
+
+
+def build_full_system_test_events() -> List[Dict[str, Any]]:
+    """Build a realistic end-to-end demo scenario from known backend log patterns."""
+    alpha_id = "did:acn:agent:demo-alpha"
+    beta_id = "did:acn:agent:demo-beta"
+
+    return [
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "IDM",
+                "log_type": "ApplyProfile",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "owner": "demo-user",
+                    "network_capability": "Perimeter inspection",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "ACN SDK",
+                "destination": "ACN Agent",
+                "task_id": "demo-alpha-identity",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "Register agent identity",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "ACN Agent",
+                "destination": "IDM",
+                "task_id": "demo-alpha-identity",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "/idm/v1/identity-applications已转发到IDM",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "owner": "demo-user",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "IDM",
+                "destination": "ACN SDK",
+                "task_id": "demo-alpha-identity",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "/idm/v1/identity-applications响应返回ACN SDK",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "AgentGW",
+                "log_type": "PublishAgent",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "agent_capability": "Route patrol, telemetry uplink",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "ACN Agent",
+                "destination": "AgentGW",
+                "task_id": "demo-alpha-card",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "/arf/v1/agent-cards已转发到AgentGW",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "AgentGW",
+                "destination": "ACN SDK",
+                "task_id": "demo-alpha-card",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "/arf/v1/agent-cards响应返回ACN SDK",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "AgentGW",
+                "log_type": "SetupConnection",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "ACN Agent",
+                "log_type": "LLMMessage",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "message": "Inspecting corridor A and validating telemetry health.",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "ACN SDK",
+                "destination": "ACN Agent",
+                "task_id": "demo-task-alpha",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "Request task execution",
+                "content": {
+                    "agent_id": alpha_id,
+                    "agent_name": "Demo Agent Alpha",
+                    "name": "Demo Agent Alpha",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "IDM",
+                "log_type": "ApplyProfile",
+                "content": {
+                    "agent_id": beta_id,
+                    "agent_name": "Demo Agent Beta",
+                    "owner": "demo-user",
+                    "network_capability": "Anomaly correlation",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "AgentGW",
+                "log_type": "PublishAgent",
+                "content": {
+                    "agent_id": beta_id,
+                    "agent_name": "Demo Agent Beta",
+                    "agent_capability": "Anomaly validation, cross-agent collaboration",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "AgentGW",
+                "log_type": "SetupConnection",
+                "content": {
+                    "agent_id": beta_id,
+                    "agent_name": "Demo Agent Beta",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "pipeline",
+            "payload": {
+                "source": "ACN SDK",
+                "destination": "ACN Agent",
+                "task_id": "demo-task-beta",
+                "protocol": "HTTP/2",
+                "headers": "",
+                "abstract": "Request task collaboration",
+                "content": {
+                    "agent_id": beta_id,
+                    "agent_name": "Demo Agent Beta",
+                    "name": "Demo Agent Beta",
+                    "is_demo": True,
+                },
+            },
+        },
+        {
+            "kind": "element",
+            "payload": {
+                "element_id": "ACN Agent",
+                "log_type": "TaskExecution",
+                "content": {
+                    "agent_id": beta_id,
+                    "agent_name": "Demo Agent Beta",
+                    "is_demo": True,
+                },
+            },
+        },
+    ]
+
+
+def _clear_local_demo_state():
+    demo_agent_ids = [
+        agent_id for agent_id, cached in agent_status_cache.items() if cached.get("is_demo")
+    ]
+    for agent_id in demo_agent_ids:
+        agent_status_cache.pop(agent_id, None)
+
+    demo_task_ids = [
+        task_id for task_id, metadata in task_control_registry.items() if metadata.get("is_demo")
+    ]
+    for task_id in demo_task_ids:
+        task_control_registry.pop(task_id, None)
+
+    control_task_history[:] = [
+        task for task in control_task_history if not task.get("isDemo")
+    ]
+
+    demo_task_prefixes = ("demo-task-", "demo-alpha-", "demo-beta-", "demo-finished-")
+    stale_task_keys = [
+        task_id for task_id in task_agent_mapping.keys() if str(task_id).startswith(demo_task_prefixes)
+    ]
+    for task_id in stale_task_keys:
+        task_agent_mapping.pop(task_id, None)
+
+
+async def run_full_system_test_demo(
+    rounds: int = 1, step_delay_seconds: float = 0.22
+) -> Dict[str, Any]:
+    """Inject registration, interaction, and collaboration events for a full UI demo."""
+    total_messages = 0
+    normalized_rounds = max(1, rounds)
+    _clear_local_demo_state()
+
+    add_log_entry(
+        "[Demo] Starting local demo scenario (no external IDM, ACN Agent, or AgentGW calls)",
+        "info",
+    )
+
+    full_demo_events = build_full_system_test_events()
+    demo_task_definitions = [
+        {
+            "id": "demo-task-alpha",
+            "name": "Perimeter Sweep",
+            "type": "Inspection",
+            "description": "Inspect corridor A and validate telemetry uplink stability.",
+            "agent_ids": ["did:acn:agent:demo-alpha"],
+            "agent_names": {"did:acn:agent:demo-alpha": "Demo Agent Alpha"},
+        },
+        {
+            "id": "demo-task-beta",
+            "name": "Correlation Assist",
+            "type": "Collaboration",
+            "description": "Correlate anomaly findings and support cross-agent verification.",
+            "agent_ids": [
+                "did:acn:agent:demo-alpha",
+                "did:acn:agent:demo-beta",
+            ],
+            "agent_names": {
+                "did:acn:agent:demo-alpha": "Demo Agent Alpha",
+                "did:acn:agent:demo-beta": "Demo Agent Beta",
+            },
+        },
+    ]
+
+    for round_index in range(normalized_rounds):
+        now = datetime.utcnow().isoformat()
+        for definition in demo_task_definitions:
+            task_id = f"{definition['id']}-r{round_index + 1}"
+            task_control_registry[task_id] = {
+                "task_name": definition["name"],
+                "task_type": definition["type"],
+                "task_description": definition["description"],
+                "created_at": now,
+                "updated_at": now,
+                "status": "processing",
+                "agent_ids": list(definition["agent_ids"]),
+                "agent_names": dict(definition["agent_names"]),
+                "is_demo": True,
+            }
+
+        for event_index, event in enumerate(full_demo_events):
+            payload = dict(event["payload"])
+            payload["timestamp"] = datetime.utcnow().isoformat()
+            if "task_id" in payload:
+                payload["task_id"] = f"{payload['task_id']}-r{round_index + 1}"
+
+            if event["kind"] == "pipeline":
+                await receive_pipeline_log({"body": payload})
+            else:
+                await receive_element_log({"body": payload})
+
+            total_messages += 1
+            if event_index < len(full_demo_events) - 1:
+                await asyncio.sleep(step_delay_seconds)
+
+    finished_time = datetime.utcnow().isoformat()
+    control_task_history.append(
+        {
+            "id": f"demo-finished-{normalized_rounds}",
+            "taskName": "Identity Bootstrap",
+            "taskType": "Registration",
+            "description": "Finished the local identity bootstrap demo for Demo Agent Alpha.",
+            "status": "finished",
+            "involvedAgents": [
+                {
+                    "id": "did:acn:agent:demo-alpha",
+                    "name": "Demo Agent Alpha",
+                }
+            ],
+            "createdAt": finished_time,
+            "updatedAt": finished_time,
+            "isDemo": True,
+        }
+    )
+    if len(control_task_history) > max_control_task_history:
+        control_task_history.pop(0)
+
+    add_log_entry(
+        "[Demo] Local demo events injected successfully; external services were not contacted",
+        "info",
+    )
+
+    tasks = build_control_tasks_snapshot()
+    dashboard = build_dashboard_snapshot()
+    await manager.broadcast(
+        {
+            "type": "TASKS_UPDATED",
+            "payload": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "tasks": tasks,
+                "dashboard": dashboard,
+            },
+        }
+    )
+    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+
+    return {
+        "timestamp": datetime.utcnow().isoformat(),
+        "rounds": normalized_rounds,
+        "messages_sent": total_messages,
+        "tasks": tasks,
+        "dashboard": dashboard,
     }
 
 
@@ -738,6 +1684,12 @@ async def health_check():
 # Log buffer for frontend display
 log_buffer = []
 max_log_entries = 1000
+pipeline_log_buffer = []
+max_pipeline_log_entries = 200
+task_control_registry: Dict[str, Dict[str, Any]] = {}
+control_task_history: List[Dict[str, Any]] = []
+max_control_task_history = 50
+topology_test_runtime = {"running": False, "paused": False}
 
 
 def add_log_entry(message: str, level: str = "info"):
@@ -752,12 +1704,165 @@ def add_log_entry(message: str, level: str = "info"):
         log_buffer.pop(0)
 
 
+def add_pipeline_log_entry(source: str, destination: str, abstract: str, content: Any, timestamp: Any, task_id: Any):
+    entry = {
+        "source": source,
+        "destination": destination,
+        "abstract": abstract,
+        "content": content if isinstance(content, str) else json.dumps(content, ensure_ascii=False) if content else "",
+        "timestamp": timestamp or datetime.utcnow().isoformat(),
+        "task_id": task_id,
+    }
+    pipeline_log_buffer.append(entry)
+    if len(pipeline_log_buffer) > max_pipeline_log_entries:
+        pipeline_log_buffer.pop(0)
+
+
+LOG_TIMESTAMP_PATTERNS = [
+    re.compile(r"(?P<value>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:[.,]\d+)?)"),
+    re.compile(r"(?P<value>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?)"),
+]
+
+
+def _find_latest_log_file(directory: Path) -> Optional[Path]:
+    if not directory.exists() or not directory.is_dir():
+        return None
+
+    candidates = [
+        file_path
+        for file_path in directory.iterdir()
+        if file_path.is_file()
+        and file_path.suffix == ".log"
+    ]
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def _list_log_files(directory: Path) -> List[Path]:
+    if not directory.exists() or not directory.is_dir():
+        return []
+
+    candidates = [
+        file_path
+        for file_path in directory.iterdir()
+        if file_path.is_file() and file_path.suffix == ".log"
+    ]
+    return sorted(candidates, key=lambda path: path.stat().st_mtime, reverse=True)
+
+
+def _parse_log_time(line: str) -> Optional[str]:
+    for pattern in LOG_TIMESTAMP_PATTERNS:
+        match = pattern.search(line)
+        if match:
+            return match.group("value")
+    return None
+
+
+def _parse_log_level(line: str) -> str:
+    normalized = line.upper()
+    if " ERROR " in normalized or normalized.startswith("ERROR"):
+        return "error"
+    if " WARNING " in normalized or " WARN " in normalized or normalized.startswith("WARN"):
+        return "warning"
+    return "info"
+
+
+def _tail_log_entries(file_path: Path, limit: int) -> List[Dict[str, Any]]:
+    if limit <= 0:
+        return []
+
+    with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        lines = list(deque(handle, maxlen=limit))
+
+    entries = []
+    for line in lines:
+        message = line.rstrip()
+        if not message:
+            continue
+        entries.append(
+            {
+                "time": _parse_log_time(message),
+                "level": _parse_log_level(message),
+                "message": message,
+            }
+        )
+
+    return entries
+
+
+def build_network_element_logs_snapshot(limit: int = 40) -> List[Dict[str, Any]]:
+    elements: List[Dict[str, Any]] = []
+
+    for source in NETWORK_ELEMENT_LOG_SOURCES:
+        path = source["path"]
+        resolved_path: Optional[Path] = None
+        error: Optional[str] = None
+
+        try:
+            if source["mode"] == "file":
+                resolved_path = path if path.exists() else None
+                sub_logs = []
+            elif source["mode"] == "all-logs":
+                log_files = _list_log_files(path)
+                resolved_path = log_files[0] if log_files else None
+                sub_logs = [
+                    {
+                        "id": file_path.stem,
+                        "name": file_path.name,
+                        "path": str(file_path),
+                        "entries": _tail_log_entries(file_path, limit),
+                        "error": None,
+                    }
+                    for file_path in log_files
+                ]
+            else:
+                resolved_path = _find_latest_log_file(path)
+                sub_logs = []
+
+            if resolved_path is None:
+                error = "Log file not found."
+                entries = []
+                if source["mode"] == "all-logs":
+                    sub_logs = []
+            else:
+                entries = _tail_log_entries(resolved_path, limit)
+        except Exception as exc:
+            error = str(exc)
+            entries = []
+            sub_logs = []
+
+        elements.append(
+            {
+                "id": source["id"],
+                "name": source["name"],
+                "path": str(resolved_path or path),
+                "entries": entries,
+                "subLogs": sub_logs,
+                "error": error,
+            }
+        )
+
+    return elements
+
+
 @app.get("/api/logs")
 async def get_logs(limit: int = 100):
     """Get recent backend logs"""
     return {
         "logs": log_buffer[-limit:] if log_buffer else [],
         "total": len(log_buffer),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/network-element-logs")
+async def get_network_element_logs(limit: int = 40):
+    """Get recent logs for ACN Agent, AgentGW, and IDM."""
+    normalized_limit = max(10, min(limit, 120))
+    return {
+        "elements": build_network_element_logs_snapshot(normalized_limit),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -784,13 +1889,18 @@ async def clear_environment():
 
     agent_status_cache.clear()
     task_agent_mapping.clear()
+    pipeline_log_buffer.clear()
+    task_control_registry.clear()
+    control_task_history.clear()
     agents = _merge_agent_sources()
     dashboard = build_dashboard_snapshot()
+    tasks = build_control_tasks_snapshot()
     payload = {
         "timestamp": datetime.utcnow().isoformat(),
         "agents": agents,
         "arf_response": result.get("response"),
         "dashboard": dashboard,
+        "tasks": tasks,
     }
 
     await manager.broadcast({"type": "REFRESH_COMPLETE", "payload": payload})
@@ -798,6 +1908,305 @@ async def clear_environment():
     return {
         "success": True,
         "message": "Environment cleared successfully.",
+        **payload,
+    }
+
+
+@app.post("/api/control/test-messages/topology-demo")
+async def trigger_topology_test_demo(request: Request):
+    """Inject a focused pipeline-log demo for the Topology Map."""
+    if topology_test_runtime["running"]:
+        raise HTTPException(status_code=409, detail="Topology test is already running.")
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    rounds = body.get("rounds", 1)
+    step_delay_seconds = body.get("step_delay_seconds", 0.12)
+
+    try:
+        result = await run_topology_test_demo(
+            rounds=int(rounds),
+            step_delay_seconds=max(0.02, float(step_delay_seconds)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run topology test demo: {e}")
+
+    return {
+        "success": True,
+        "message": f"Topology demo injected with {result['messages_sent']} messages.",
+        **result,
+    }
+
+
+@app.post("/api/control/test-messages/topology-demo/pause")
+async def pause_topology_test_demo():
+    """Pause an in-flight topology test demo."""
+    if not topology_test_runtime["running"]:
+        return {
+            "success": False,
+            "running": False,
+            "paused": False,
+            "message": "Topology test is not running.",
+        }
+
+    topology_test_runtime["paused"] = True
+    return {
+        "success": True,
+        "running": True,
+        "paused": True,
+        "message": "Topology test paused.",
+    }
+
+
+@app.post("/api/control/test-messages/topology-demo/resume")
+async def resume_topology_test_demo():
+    """Resume a paused topology test demo."""
+    if not topology_test_runtime["running"]:
+        return {
+            "success": False,
+            "running": False,
+            "paused": False,
+            "message": "Topology test is not running.",
+        }
+
+    topology_test_runtime["paused"] = False
+    return {
+        "success": True,
+        "running": True,
+        "paused": False,
+        "message": "Topology test resumed.",
+    }
+
+
+@app.post("/api/control/test-messages/full-demo")
+async def trigger_full_system_test_demo(request: Request):
+    """Inject a broader local registration + interaction demo for the full WebUI."""
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    rounds = body.get("rounds", 1)
+    step_delay_seconds = body.get("step_delay_seconds", 0.22)
+
+    try:
+        result = await run_full_system_test_demo(
+            rounds=int(rounds),
+            step_delay_seconds=max(0.05, float(step_delay_seconds)),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to run full system demo: {e}")
+
+    return {
+        "success": True,
+        "message": f"Local demo injected with {result['messages_sent']} events.",
+        **result,
+    }
+
+
+@app.get("/api/control/tasks")
+async def get_control_tasks():
+    """Get active and recently finished control tasks."""
+    return {
+        "tasks": build_control_tasks_snapshot(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/control/tasks")
+async def dispatch_control_task(request: Request):
+    """Dispatch a new task across one or more agents."""
+    body = await request.json()
+    agent_ids = body.get("agent_ids") or []
+    task_type = str(body.get("task_type") or "").strip()
+    task_description = str(body.get("task_description") or "").strip()
+    task_name = str(body.get("task_name") or task_type or "Task").strip()
+
+    if not isinstance(agent_ids, list) or not agent_ids:
+        raise HTTPException(status_code=400, detail="At least one agent must be selected.")
+    if not task_type:
+        raise HTTPException(status_code=400, detail="Task type is required.")
+    if not task_description:
+        raise HTTPException(status_code=400, detail="Task description is required.")
+
+    normalized_agent_ids = []
+    for agent_id in agent_ids:
+        value = str(agent_id).strip()
+        if value and value not in normalized_agent_ids:
+            normalized_agent_ids.append(value)
+
+    if not normalized_agent_ids:
+        raise HTTPException(status_code=400, detail="No valid agents were provided.")
+
+    task_id = f"task-{datetime.utcnow().strftime('%Y%m%d%H%M%S%f')}"
+    now = datetime.utcnow().isoformat()
+    agent_names = _task_agent_name_lookup()
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.executemany(
+            "INSERT INTO tasks (agent_id, task_id, task_description) VALUES (?, ?, ?)",
+            [
+                (agent_id, task_id, task_description)
+                for agent_id in normalized_agent_ids
+            ],
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to dispatch task: {e}")
+
+    task_control_registry[task_id] = {
+        "task_name": task_name,
+        "task_type": task_type,
+        "task_description": task_description,
+        "created_at": now,
+        "updated_at": now,
+        "status": "processing",
+        "agent_ids": list(normalized_agent_ids),
+        "agent_names": {
+            agent_id: agent_names.get(agent_id, agent_id)
+            for agent_id in normalized_agent_ids
+        },
+    }
+
+    for agent_id in normalized_agent_ids:
+        cache_entry = agent_status_cache.setdefault(
+            agent_id,
+            {
+                "agent_name": agent_names.get(agent_id, agent_id),
+                "logs": [],
+            },
+        )
+        cache_entry["work_status"] = "working"
+        cache_entry["current_task"] = task_description
+        cache_entry["last_update"] = now
+        cache_entry.setdefault("logs", []).append(
+            {
+                "time": now,
+                "level": "info",
+                "message": f"Dispatched task {task_name}",
+            }
+        )
+        if len(cache_entry["logs"]) > 10:
+            cache_entry["logs"] = cache_entry["logs"][-10:]
+
+    add_log_entry(
+        f"[Control] Dispatched task {task_id} ({task_type}) to {len(normalized_agent_ids)} agents",
+        "info",
+    )
+
+    tasks = build_control_tasks_snapshot()
+    agents = _merge_agent_sources()
+    dashboard = build_dashboard_snapshot()
+    payload = {
+        "timestamp": now,
+        "taskId": task_id,
+        "tasks": tasks,
+        "agents": agents,
+        "dashboard": dashboard,
+    }
+
+    await manager.broadcast({"type": "TASKS_UPDATED", "payload": payload})
+
+    return {
+        "success": True,
+        "message": f"Task {task_name} dispatched.",
+        **payload,
+    }
+
+
+@app.post("/api/control/tasks/{task_id}/stop")
+async def stop_control_task(task_id: str):
+    """Stop a running task and mark it finished in the control surface."""
+    active_tasks = {
+        item["id"]: item
+        for item in build_control_tasks_snapshot()
+        if item.get("status") == "processing"
+    }
+    task = active_tasks.get(task_id)
+
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found.")
+
+    now = datetime.utcnow().isoformat()
+    involved_agents = task.get("involvedAgents", [])
+    involved_agent_ids = [
+        str(agent.get("id"))
+        for agent in involved_agents
+        if agent.get("id")
+    ]
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to stop task: {e}")
+
+    task_control_registry[task_id] = {
+        **task_control_registry.get(task_id, {}),
+        "task_name": task.get("taskName"),
+        "task_type": task.get("taskType"),
+        "task_description": task.get("description"),
+        "created_at": task.get("createdAt") or now,
+        "updated_at": now,
+        "status": "finished",
+        "agent_ids": involved_agent_ids,
+        "agent_names": {
+            str(agent.get("id")): str(agent.get("name") or agent.get("id"))
+            for agent in involved_agents
+            if agent.get("id")
+        },
+    }
+
+    finished_record = {
+        **task,
+        "status": "finished",
+        "updatedAt": now,
+    }
+    control_task_history.append(finished_record)
+    if len(control_task_history) > max_control_task_history:
+        control_task_history.pop(0)
+
+    remaining_tasks = get_tasks_from_db()
+    remaining_by_agent: Dict[str, str] = {}
+    for remaining_task in remaining_tasks:
+        for agent_id in remaining_task.get("agent_ids", []):
+            remaining_by_agent.setdefault(
+                agent_id,
+                str(remaining_task.get("description") or ""),
+            )
+
+    for agent_id in involved_agent_ids:
+        cache_entry = agent_status_cache.get(agent_id)
+        if not cache_entry:
+            continue
+
+        cache_entry["last_update"] = now
+        if agent_id in remaining_by_agent:
+            cache_entry["work_status"] = "working"
+            cache_entry["current_task"] = remaining_by_agent[agent_id]
+        else:
+            cache_entry["work_status"] = "idle"
+            cache_entry["current_task"] = ""
+
+    add_log_entry(f"[Control] Stopped task {task_id}", "warning")
+
+    tasks = build_control_tasks_snapshot()
+    agents = _merge_agent_sources()
+    dashboard = build_dashboard_snapshot()
+    payload = {
+        "timestamp": now,
+        "taskId": task_id,
+        "tasks": tasks,
+        "agents": agents,
+        "dashboard": dashboard,
+    }
+
+    await manager.broadcast({"type": "TASKS_UPDATED", "payload": payload})
+
+    return {
+        "success": True,
+        "message": f"Task {task.get('taskName') or task_id} stopped.",
         **payload,
     }
 
@@ -1148,6 +2557,14 @@ async def receive_pipeline_log(request: Dict[str, Any]):
         log_msg = f"{log_message['payload']['source']} -> {log_message['payload']['destination']}: {log_message['payload']['abstract'] or log_message['payload']['content'][:50]}"
         print(f"[Pipeline Log] {log_msg}")
         add_log_entry(log_msg, "info")
+        add_pipeline_log_entry(
+            source=log_message["payload"]["source"],
+            destination=log_message["payload"]["destination"],
+            abstract=log_message["payload"]["abstract"],
+            content=log_message["payload"]["content"],
+            timestamp=log_message["payload"]["timestamp"],
+            task_id=log_message["payload"]["task_id"],
+        )
 
         # Broadcast to all connected WebSocket clients
         await manager.broadcast(log_message)
@@ -1219,6 +2636,7 @@ async def receive_pipeline_log(request: Dict[str, Any]):
 
                 if agent_id:
                     timestamp = body.get("timestamp", datetime.utcnow().isoformat())
+                    is_demo = bool(content.get("is_demo"))
 
                     # Update agent status cache
                     if agent_id not in agent_status_cache:
@@ -1231,6 +2649,7 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                             "agent_status": "online",
                             "agent_capability": [],
                             "last_update": timestamp,
+                            "is_demo": is_demo,
                         }
                     else:
                         agent_status_cache[agent_id]["work_status"] = work_status
@@ -1238,6 +2657,8 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                         if agent_name:
                             agent_status_cache[agent_id]["agent_name"] = agent_name
                         agent_status_cache[agent_id]["last_update"] = timestamp
+                        if is_demo:
+                            agent_status_cache[agent_id]["is_demo"] = True
 
                     # Broadcast status update
                     status_message = {
@@ -1348,6 +2769,7 @@ async def receive_element_log(request: Dict[str, Any]):
         # Extract agent_id from content
         agent_id = content.get("agent_id", "")
         agent_name = content.get("agent_name", "")
+        is_demo = bool(content.get("is_demo"))
 
         # Determine work status based on log_type
         work_status, task_desc = get_work_status_from_log_type(log_type)
@@ -1382,6 +2804,7 @@ async def receive_element_log(request: Dict[str, Any]):
                     if content.get("agent_capability")
                     else [],
                     "last_update": timestamp,
+                    "is_demo": is_demo,
                 }
             else:
                 # Update existing agent status
@@ -1390,6 +2813,8 @@ async def receive_element_log(request: Dict[str, Any]):
                 if agent_name:
                     agent_status_cache[agent_id]["agent_name"] = agent_name
                 agent_status_cache[agent_id]["last_update"] = timestamp
+                if is_demo:
+                    agent_status_cache[agent_id]["is_demo"] = True
 
             # Add log entry
             agent_status_cache[agent_id]["logs"].append(log_entry)
@@ -1505,6 +2930,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     if result.get("success"):
                         agent_status_cache.clear()
                         task_agent_mapping.clear()
+                        pipeline_log_buffer.clear()
+                        task_control_registry.clear()
+                        control_task_history.clear()
                         # Get fresh agent list after clear
                         agents = _merge_agent_sources()
 
@@ -1517,6 +2945,7 @@ async def websocket_endpoint(websocket: WebSocket):
                                     "agents": agents,
                                     "arf_response": result.get("response"),
                                     "dashboard": build_dashboard_snapshot(),
+                                    "tasks": build_control_tasks_snapshot(),
                                 },
                             }
                         )
