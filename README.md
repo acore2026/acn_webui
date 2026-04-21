@@ -1,45 +1,101 @@
-# ACN Agent Monitor
+# ACN WebUI
 
-Full-stack monitoring system with React frontend and Python backend.
+ACN WebUI is a FastAPI + React dashboard for monitoring ACN agents, network elements, task activity, backend logs, and live message flow between `ACN SDK`, `ACN Agent`, `IDM`, and `AgentGW`.
 
-## Architecture
+It serves a built frontend from the FastAPI backend on port `9005` and uses WebSocket updates for live dashboard refreshes.
 
-```
-/root/lpx/webui/
-├── backend/              # Python FastAPI Backend
+## What It Does
+
+- Overview dashboard with live metrics, network element status, React Flow topology, and system events
+- Agent roster with per-agent detail modal
+- Network page with backend logs and per-element log viewers
+- Control page for clear/demo actions and task dispatch/stop
+- WebSocket-driven live updates for agents, dashboard snapshots, and task changes
+- Receives external pipeline and element logs through ACN callback endpoints
+
+## Runtime Ports
+
+- WebUI API: `http://localhost:9005`
+- WebUI WebSocket: `ws://localhost:9005/ws`
+- ACN Agent status probe: `9010`
+- AgentGW services:
+  - `ARF`: `9001`
+  - `ACF`: `9002`
+  - `Relay`: `9003`
+- IDM status probe: `9020`
+
+## Project Layout
+
+```text
+webui/
+├── backend/
 │   ├── app/
-│   │   ├── __init__.py
-│   │   └── main.py       # FastAPI application + WebSocket
+│   │   ├── main.py
+│   │   ├── moq_video.py
+│   │   └── video_stream.py
 │   ├── requirements.txt
 │   └── start.sh
-├── frontend/             # React Frontend
+├── frontend/
 │   ├── public/
-│   │   └── index.html
 │   ├── src/
-│   │   ├── components/   # React components
-│   │   ├── hooks/        # Custom hooks (useWebSocket)
-│   │   ├── styles/       # CSS files
-│   │   ├── utils/        # Mock data & utilities
-│   │   ├── App.jsx
-│   │   └── index.js
-│   └── package.json
-└── start.sh             # Main start script
+│   │   ├── dashboard/
+│   │   │   ├── components/
+│   │   │   ├── pages/
+│   │   │   ├── i18n.ts
+│   │   │   └── types.ts
+│   │   ├── styles/
+│   │   ├── App.tsx
+│   │   └── index.tsx
+│   ├── package.json
+│   └── build/
+├── logs/
+├── test/
+├── API.md
+└── start_all.sh
 ```
+
+## Stack
+
+### Frontend
+
+- React 18
+- TypeScript
+- Tailwind CSS
+- `@xyflow/react` for topology/message-flow diagrams
+
+### Backend
+
+- FastAPI
+- WebSockets
+- `httpx`
+- SQLite-backed agent/task reads
+- Uvicorn
 
 ## Quick Start
 
-### 1. Start Backend
+### Recommended: run the integrated WebUI
 
 ```bash
 cd /root/lpx/webui
-./start.sh
+./start_all.sh start
 ```
 
-Backend will start on:
-- API: http://0.0.0.0:9050
-- WebSocket: ws://0.0.0.0:9050/ws
+Useful commands:
 
-### 2. Start Frontend (Development)
+```bash
+./start_all.sh restart
+./start_all.sh status
+./start_all.sh logs
+./start_all.sh stop
+```
+
+The script:
+
+- builds the React frontend
+- starts the FastAPI backend on `9005`
+- serves the built frontend from the backend
+
+### Frontend development mode
 
 ```bash
 cd /root/lpx/webui/frontend
@@ -47,108 +103,147 @@ npm install
 npm start
 ```
 
-Frontend will start on http://localhost:3000
+This starts the React dev server on `http://localhost:9006`.
 
-### 3. Build for Production
+### Backend only
 
 ```bash
-cd /root/lpx/webui/frontend
-npm run build
+cd /root/lpx/webui/backend
+/root/lpx/webui/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9005
 ```
 
-The build will be created in `/root/lpx/webui/frontend/build/`
+## Main API Surface
 
-## Features
+### Core
 
-### Frontend (React)
-- **TopBar**: System metrics (latency, bandwidth, active agents, clock)
-- **SidebarLeft**: Registered agents list with capabilities
-- **CenterContent**:
-  - Agent Work Status with operation logs
-  - Message Flow (real-time communication logs)
-  - Control Center (dispatch tasks, emergency controls)
-- **SidebarRight**: Live video feeds with Canvas animation
-- **TaskModal**: Task dispatch interface
+- `GET /api/health`
+- `GET /api/agents`
+- `GET /api/logs`
+- `GET /api/network-element-logs`
+- `GET /api/dashboard/overview`
+- `WS /ws`
 
-### Backend (Python/FastAPI)
-- REST API for agent data
-- WebSocket for real-time communication
-- CORS enabled for frontend integration
-- Automatic reconnection handling
+### Control
 
-## API Endpoints
+- `POST /api/control/clear`
+- `POST /api/control/test-messages/topology-demo`
+- `POST /api/control/test-messages/topology-demo/pause`
+- `POST /api/control/test-messages/topology-demo/resume`
+- `POST /api/control/test-messages/full-demo`
+- `GET /api/control/tasks`
+- `POST /api/control/tasks`
+- `POST /api/control/tasks/{task_id}/stop`
 
-- `GET /api/agents` - Get all registered agents
-- `GET /api/health` - Health check
-- `WS /ws` - WebSocket endpoint
+### Incoming ACN callbacks
 
-## WebSocket Messages
+- `POST /acn/v3/pipeline-logs`
+- `POST /acn/v3/element-logs`
+- `POST /api/acn/v3/subscribe_track`
 
-### Client to Server:
-- `DISPATCH_TASK` - Dispatch a task to an agent
-- `EMERGENCY_LAND` - Emergency landing command
-- `ABORT_ALL` - Abort all tasks
-- `PING` - Keep-alive ping
+### MOQ / video
 
-### Server to Client:
-- `AGENT_LIST` - Updated agent list
-- `TASK_DISPATCHED` - Task dispatch confirmation
-- `EMERGENCY_LAND` - Emergency landing broadcast
-- `ABORT_ALL` - Abort all broadcast
-- `PONG` - Ping response
+- `GET /api/moq/status`
+- `POST /api/moq/subscribe`
+- `POST /api/moq/unsubscribe/{track_id}`
+- `GET /api/moq/tracks/{track_id}/frames`
+- `POST /api/moq/auto-subscribe/{agent_id}`
+- `GET /api/video/streams`
+- `GET /api/video/streams/{agent_id}`
+- `POST /api/video/streams/{agent_id}/register`
+- `POST /api/video/webrtc/offer`
+- `POST /api/video/webrtc/answer`
+- `POST /api/video/webrtc/ice`
 
-## Mock Data
+More detail is in [API.md](/root/lpx/webui/API.md:1).
 
-The system includes 7 business agents:
-- Drone Alpha, Beta, Gamma
-- Ground Unit 1
-- Marine Unit A
-- RobotDog
-- RobotARM
+## Data Sources And External Dependencies
 
-Plus 3 service agents (IDM, ARF, ACF) - hidden from UI.
+The dashboard is not self-contained. It reads from external ACN services and files:
 
-## Technology Stack
+- Agent/task database:
+  - `/home/acn/zqm/acn_gw/agent_gw/agent_gw.db`
+- ACN Agent log:
+  - `/home/acn/cxr/acn_agent/.acn_agent.log`
+- AgentGW logs:
+  - `/home/acn/zqm/acn_gw/agent_gw/logs`
+- IDM logs:
+  - `/home/acn/cx/idm/logs`
+- ARF clear endpoint:
+  - `http://localhost:9001/clear`
 
-### Frontend
-- React 18
-- CSS Modules
-- WebSocket API
-- Canvas API for video simulation
+The Overview `Network Element Status` section checks local reachability of these services. That check is real, but it is a port-level availability check, not a full application health check.
 
-### Backend
-- FastAPI
-- WebSockets
-- SQLite (for agent data)
-- Uvicorn (ASGI server)
+## Frontend Pages
 
-## Development
+- `Overview`
+  - live metrics
+  - network element status
+  - React Flow topology/message paths
+  - critical events feed
+- `Agents`
+  - current agent roster
+  - click a card to view details
+- `Network`
+  - backend logs
+  - tabbed ACN Agent / AgentGW / IDM logs
+  - inter-agent link summary
+- `Control`
+  - clear action with confirmation
+  - demo/test triggers
+  - task list and task dispatch/stop
+- `Settings`
+  - UI copy and policy-oriented informational settings
 
-### Adding New Components
+## Test And Demo Utilities
 
-1. Create component directory: `src/components/ComponentName/`
-2. Create `ComponentName.jsx` and `ComponentName.css`
-3. Import and use in `App.jsx`
+The repo includes test utilities under `test/`.
 
-### Adding New API Endpoints
+Most useful for the current UI:
 
-1. Edit `/root/lpx/webui/backend/app/main.py`
-2. Add new route with `@app.get()` or `@app.post()`
-3. Restart backend server
+```bash
+cd /root/lpx/webui
+python3 test/test_messages.py --topology-demo --host 127.0.0.1 --port 9005
+python3 test/test_messages.py --full-demo --host 127.0.0.1 --port 9005
+```
 
-## Troubleshooting
+The WebUI also exposes demo buttons in the UI for:
 
-### Backend won't start
-- Check if port 9050 is available: `ss -tlnp | grep 9050`
-- Check backend log: `tail -f /tmp/webui_backend.log`
-- Ensure virtual environment is activated
+- topology test flow
+- full dashboard demo flow
 
-### Frontend won't connect
-- Verify backend is running: `curl http://localhost:9050/api/health`
-- Check CORS configuration in backend
-- Verify WebSocket URL in `useWebSocket.js`
+## Logs
 
-### No data displayed
-- Check browser console for errors
-- Verify WebSocket connection status
-- Check mock data is loaded correctly
+WebUI runtime logs are written to:
+
+- backend log: `logs/backend.log`
+- frontend build log: `logs/frontend_build.log`
+
+## Common Problems
+
+### WebUI does not start
+
+Check:
+
+```bash
+./start_all.sh status
+tail -f logs/backend.log
+tail -f logs/frontend_build.log
+```
+
+### Frontend cannot reach backend in development mode
+
+Use the React dev server on `9006` and make sure the backend is running on `9005`.
+
+### Overview status looks wrong
+
+The `Network Element Status` cards only show whether the local port/listener is reachable. A process can still be unhealthy while showing `online`.
+
+### Clear does not fully remove visible agents
+
+The WebUI merges database-backed agent identity with live runtime cache. If you change the external AgentGW/ARF data source, the WebUI reflects the database view plus fresh runtime events.
+
+## Notes
+
+- The current dashboard is localized for English and Chinese.
+- Theme defaults to light mode.
+- The React Flow topology is intentionally presentation-oriented and driven by recent message-flow events rather than a full persisted network graph.
