@@ -875,8 +875,20 @@ def _message_level_from_log(entry: Dict[str, Any]) -> str:
     return "info"
 
 
+def _should_include_dashboard_message(entry: Dict[str, Any]) -> bool:
+    message = str(entry.get("message", "")).strip().lower()
+    if not message:
+        return False
+
+    return "send moq object" not in message
+
+
 def build_dashboard_messages(limit: int = 8) -> List[Dict[str, Any]]:
-    recent_logs = list(reversed(log_buffer[-limit:])) if log_buffer else []
+    recent_logs = (
+        [entry for entry in reversed(log_buffer) if _should_include_dashboard_message(entry)][:limit]
+        if log_buffer
+        else []
+    )
     messages = []
 
     for index, entry in enumerate(recent_logs):
