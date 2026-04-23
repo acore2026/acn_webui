@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { DemoConfigModal, DemoStage } from './dashboard/components/DemoConfigModal';
 import { SidebarNav } from './dashboard/components/SidebarNav';
 import { ThemeMode } from './dashboard/components/ThemeSettingsButton';
 import { AgentsPage } from './dashboard/pages/AgentsPage';
@@ -13,7 +14,11 @@ import {
   ControlTask,
   DashboardMockData,
   NavKey,
-  NetworkElementLogGroup
+  NetworkElementLogGroup,
+  VideoTrackDraft,
+  VideoPlayerConfig,
+  VideoPlayerBootstrap,
+  VideoTrackModel
 } from './dashboard/types';
 
 const emptyDashboardData: DashboardMockData = {
@@ -29,6 +34,8 @@ const emptyDashboardData: DashboardMockData = {
   },
   messages: []
 };
+const defaultDemoStages: DemoStage[] = ['register', 'task', 'cooperate'];
+const TOPOLOGY_TEST_SPEED_STORAGE_KEY = 'topology-test-speed-v2';
 
 const App = () => {
   const [activeTab, setActiveTab] = useState<NavKey>('overview');
@@ -47,18 +54,35 @@ const App = () => {
   const [controlTasks, setControlTasks] = useState<ControlTask[]>([]);
   const [controlTasksLoading, setControlTasksLoading] = useState(true);
   const [controlTasksError, setControlTasksError] = useState<string | null>(null);
+  const [videoTracks, setVideoTracks] = useState<VideoTrackModel[]>([]);
+  const [videoTracksLoading, setVideoTracksLoading] = useState(true);
+  const [videoTracksError, setVideoTracksError] = useState<string | null>(null);
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
   const [topologyTestBusy, setTopologyTestBusy] = useState(false);
   const [topologyTestPaused, setTopologyTestPaused] = useState(false);
   const [topologyTestMessage, setTopologyTestMessage] = useState<string | null>(null);
   const [topologyTestSpeed, setTopologyTestSpeed] = useState<number>(() => {
-    const stored = window.localStorage.getItem('topology-test-speed');
+    const stored = window.localStorage.getItem(TOPOLOGY_TEST_SPEED_STORAGE_KEY);
     const parsed = stored ? Number(stored) : 1;
     return Number.isFinite(parsed) && parsed >= 0.1 && parsed <= 2 ? parsed : 1;
   });
   const [fullDemoBusy, setFullDemoBusy] = useState(false);
   const [fullDemoMessage, setFullDemoMessage] = useState<string | null>(null);
+  const [demoConfigOpen, setDemoConfigOpen] = useState(false);
+  const [demoConfigStages, setDemoConfigStages] = useState<DemoStage[]>(() => {
+    const stored = window.localStorage.getItem('dashboard-demo-stages');
+    if (!stored) {
+      return defaultDemoStages;
+    }
+
+    try {
+      const parsed = JSON.parse(stored);
+      return Array.isArray(parsed) && parsed.length > 0 ? parsed as DemoStage[] : defaultDemoStages;
+    } catch {
+      return defaultDemoStages;
+    }
+  });
   const [pendingScrollTarget, setPendingScrollTarget] = useState<string | null>(null);
   const [theme, setTheme] = useState<ThemeMode>(() => {
     const stored = window.localStorage.getItem('dashboard-theme');
@@ -84,8 +108,12 @@ const App = () => {
   }, [language]);
 
   useEffect(() => {
-    window.localStorage.setItem('topology-test-speed', String(topologyTestSpeed));
+    window.localStorage.setItem(TOPOLOGY_TEST_SPEED_STORAGE_KEY, String(topologyTestSpeed));
   }, [topologyTestSpeed]);
+
+  useEffect(() => {
+    window.localStorage.setItem('dashboard-demo-stages', JSON.stringify(demoConfigStages));
+  }, [demoConfigStages]);
 
   useEffect(() => {
     if (!pendingScrollTarget) {
@@ -250,6 +278,35 @@ const App = () => {
     return () => window.clearInterval(interval);
   }, [fetchControlTasks]);
 
+  const fetchVideoTracks = useCallback(async () => {
+    try {
+      const response = await fetch('/api/moq/tracks');
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = (await response.json()) as { tracks?: VideoTrackModel[] };
+      setVideoTracks(Array.isArray(payload.tracks) ? payload.tracks : []);
+      setVideoTracksLoading(false);
+      setVideoTracksError(null);
+      return true;
+    } catch (error) {
+      console.error('Failed to load video tracks:', error);
+      setVideoTracksLoading(false);
+      setVideoTracksError(isZh ? '无法加载视频轨道。' : 'Unable to load video tracks.');
+      return false;
+    }
+  }, [isZh]);
+
+  useEffect(() => {
+    void fetchVideoTracks();
+    const interval = window.setInterval(() => {
+      void fetchVideoTracks();
+    }, 7000);
+
+    return () => window.clearInterval(interval);
+  }, [fetchVideoTracks]);
+
   useEffect(() => {
     if (!lastMessage) {
       return;
@@ -281,6 +338,7 @@ const App = () => {
             ? '环境清理已完成，仪表盘快照已刷新。'
             : 'Environment clear completed and the dashboard snapshot was refreshed.'
         );
+        void fetchVideoTracks();
         return;
       }
 
@@ -294,6 +352,12 @@ const App = () => {
         applySnapshot(payload.dashboard);
         setDispatchBusy(false);
         setStoppingTaskId(null);
+        void fetchVideoTracks();
+        return;
+      }
+
+      if (data.type === 'VIDEO_TRACKS_AVAILABLE') {
+        void fetchVideoTracks();
         return;
       }
 
@@ -306,7 +370,7 @@ const App = () => {
     } catch (error) {
       console.error('Failed to parse dashboard WebSocket payload:', error);
     }
-  }, [applySnapshot, isZh, lastMessage]);
+  }, [applySnapshot, fetchVideoTracks, isZh, lastMessage]);
 
   const handleClearEnvironment = useCallback(async () => {
     setControlBusy(true);
@@ -520,7 +584,7 @@ const App = () => {
         },
         body: JSON.stringify({
           rounds: 1,
-          step_delay_seconds: Number((0.12 / topologyTestSpeed).toFixed(3))
+          step_delay_seconds: Number((1.2 / topologyTestSpeed).toFixed(3))
         })
       });
       const payload = (await response.json()) as {
@@ -593,7 +657,8 @@ const App = () => {
     }
   }, [isZh, topologyTestPaused]);
 
-  const handleRunFullDemo = useCallback(async () => {
+  const handleRunFullDemo = useCallback(async (stages: DemoStage[]) => {
+    setDemoConfigStages(stages);
     setFullDemoBusy(true);
     setFullDemoMessage(copy.demoAction.running);
 
@@ -605,7 +670,8 @@ const App = () => {
         },
         body: JSON.stringify({
           rounds: 1,
-          step_delay_seconds: 0.22
+          step_delay_seconds: 0.22,
+          stages
         })
       });
       const payload = (await response.json()) as {
@@ -641,10 +707,118 @@ const App = () => {
     }
   }, [applySnapshot, copy.demoAction.failed, copy.demoAction.running, copy.demoAction.success, fetchBackendLogs, fetchNetworkElementLogs]);
 
+  const handleQuickRunDemo = useCallback(() => {
+    void handleRunFullDemo(demoConfigStages);
+  }, [demoConfigStages, handleRunFullDemo]);
+
+  const handleWatchVideoTrack = useCallback(
+    async (
+      trackId: string
+    ): Promise<{ player: VideoPlayerConfig; bootstrap?: VideoPlayerBootstrap; track?: VideoTrackModel }> => {
+      const response = await fetch(`/api/moq/watch/${encodeURIComponent(trackId)}`, {
+        method: 'POST'
+      });
+      const payload = (await response.json()) as {
+        player?: VideoPlayerConfig;
+        bootstrap?: VideoPlayerBootstrap;
+        track?: VideoTrackModel;
+        detail?: string;
+        message?: string;
+      };
+
+      if (!response.ok || !payload.player) {
+        throw new Error(
+          payload.detail ||
+            payload.message ||
+            (isZh ? '视频订阅失败。' : 'Failed to subscribe to the selected video track.')
+        );
+      }
+
+      if (payload.track) {
+        setVideoTracks((current) =>
+          current.map((track) => (track.trackId === payload.track?.trackId ? payload.track : track))
+        );
+      } else {
+        void fetchVideoTracks();
+      }
+
+      return {
+        player: payload.player,
+        bootstrap: payload.bootstrap,
+        track: payload.track
+      };
+    },
+    [fetchVideoTracks, isZh]
+  );
+
+  const handleCreateVideoTrack = useCallback(
+    async (draft: VideoTrackDraft): Promise<void> => {
+      const response = await fetch('/api/moq/tracks', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(draft)
+      });
+
+      const payload = (await response.json()) as {
+        detail?: string;
+        message?: string;
+        track?: VideoTrackModel;
+      };
+
+      if (!response.ok || !payload.track) {
+        throw new Error(
+          payload.detail ||
+            payload.message ||
+            (isZh ? '视频轨道添加失败。' : 'Failed to add the video track.')
+        );
+      }
+
+      await fetchVideoTracks();
+    },
+    [fetchVideoTracks, isZh]
+  );
+
+  const handleDeleteVideoTrack = useCallback(
+    async (trackId: string): Promise<void> => {
+      const response = await fetch(`/api/moq/tracks/${encodeURIComponent(trackId)}`, {
+        method: 'DELETE'
+      });
+
+      const payload = (await response.json()) as {
+        detail?: string;
+        message?: string;
+      };
+
+      if (!response.ok) {
+        throw new Error(
+          payload.detail ||
+            payload.message ||
+            (isZh ? '视频轨道删除失败。' : 'Failed to delete the video track.')
+        );
+      }
+
+      await fetchVideoTracks();
+    },
+    [fetchVideoTracks, isZh]
+  );
+
   const renderPage = () => {
     switch (activeTab) {
       case 'agents':
-        return <AgentsPage agents={dashboardData.topology.agents} language={language} />;
+        return (
+          <AgentsPage
+            agents={dashboardData.topology.agents}
+            videoTracks={videoTracks}
+            videoTracksLoading={videoTracksLoading}
+            videoTracksError={videoTracksError}
+            language={language}
+            onCreateTrack={handleCreateVideoTrack}
+            onDeleteTrack={handleDeleteVideoTrack}
+            onWatchTrack={handleWatchVideoTrack}
+          />
+        );
       case 'network':
         return (
           <NetworkPage
@@ -716,7 +890,8 @@ const App = () => {
           fullDemoBusy={fullDemoBusy}
           fullDemoMessage={fullDemoMessage}
           onLanguageChange={setLanguage}
-          onRunFullDemo={handleRunFullDemo}
+          onOpenDemoConfig={() => setDemoConfigOpen(true)}
+          onQuickRunDemo={handleQuickRunDemo}
           onSelect={setActiveTab}
           onThemeChange={setTheme}
         />
@@ -764,6 +939,15 @@ const App = () => {
           </div>
         </main>
       </div>
+
+      <DemoConfigModal
+        open={demoConfigOpen}
+        busy={fullDemoBusy}
+        initialStages={demoConfigStages}
+        language={language}
+        onClose={() => setDemoConfigOpen(false)}
+        onSubmit={handleRunFullDemo}
+      />
     </div>
   );
 };

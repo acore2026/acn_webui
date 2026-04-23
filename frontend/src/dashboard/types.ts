@@ -91,6 +91,61 @@ export interface ControlTask {
   updatedAt: string;
 }
 
+export interface VideoTrackModel {
+  trackId: string;
+  namespace: string;
+  trackName: string;
+  normalizedTrackName: string;
+  source?: 'moq' | 'manual' | 'direct';
+  agentId: string;
+  taskId: string;
+  discoveredAt: string;
+  lastSeen: string;
+  seenCount: number;
+  watchState: 'available' | 'requested' | 'pending' | 'subscribed' | 'error';
+  lastError?: string | null;
+  metadata?: {
+    codec?: string;
+    fps?: number;
+    generated_at?: string;
+    height?: number;
+    mime_type?: string;
+    mse_codec?: string;
+    width?: number;
+  } | null;
+  lastObjectAt?: string | null;
+}
+
+export interface VideoTrackDraft {
+  agentId: string;
+  taskId: string;
+  trackName: string;
+  namespace?: string;
+}
+
+export interface VideoPlayerConfig {
+  trackId: string;
+  host: string;
+  port: number;
+  path: string;
+  certHash: string;
+  mjpegUrl?: string;
+}
+
+export interface VideoPlayerBootstrap {
+  metadata?: {
+    codec?: string;
+    fps?: number;
+    generated_at?: string;
+    height?: number;
+    mime_type?: string;
+    mse_codec?: string;
+    width?: number;
+  } | null;
+  initSegmentBase64?: string | null;
+  recentFragmentsBase64?: string[];
+}
+
 export interface ElementComponentModel {
   id: string;
   name: string;

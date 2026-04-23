@@ -1,28 +1,50 @@
 # ACN WebUI
 
-ACN WebUI is a FastAPI + React dashboard for monitoring ACN agents, network elements, task activity, backend logs, and live message flow between `ACN SDK`, `ACN Agent`, `IDM`, and `AgentGW`.
+[中文说明](./README.zh-CN.md)
 
-It serves a built frontend from the FastAPI backend on port `9005` and uses WebSocket updates for live dashboard refreshes.
+ACN WebUI is a FastAPI + React dashboard for monitoring ACN agents, tasks, network elements, backend logs, and MOQ video tracks.
 
-## What It Does
+The main product path is the integrated WebUI on port `9005`. It serves the built frontend from the FastAPI backend and pushes live updates over WebSocket.
 
-- Overview dashboard with live metrics, network element status, React Flow topology, and system events
-- Agent roster with per-agent detail modal
-- Network page with backend logs and per-element log viewers
-- Control page for clear/demo actions and task dispatch/stop
-- WebSocket-driven live updates for agents, dashboard snapshots, and task changes
-- Receives external pipeline and element logs through ACN callback endpoints
+## Runtime Overview
 
-## Runtime Ports
-
-- WebUI API: `http://localhost:9005`
-- WebUI WebSocket: `ws://localhost:9005/ws`
+- Main WebUI: `http://localhost:9005`
+- Main WebSocket: `ws://localhost:9005/ws`
+- Optional standalone video service: `http://localhost:9006`
+- AgentGW `ARF`: `9001`
+- AgentGW `ACF`: `9002`
+- AgentGW `Relay`: `9003`
 - ACN Agent status probe: `9010`
-- AgentGW services:
-  - `ARF`: `9001`
-  - `ACF`: `9002`
-  - `Relay`: `9003`
 - IDM status probe: `9020`
+
+## Current Architecture
+
+### Main backend (`9005`)
+
+The integrated backend lives in [backend/app/main.py](/root/lpx/webui/backend/app/main.py:1).
+
+It is responsible for:
+- serving the built React app
+- exposing the dashboard APIs
+- reading agents and tasks from the external SQLite database
+- collecting backend and element logs
+- managing MOQ track discovery, watch, unsubscribe, and browser playback
+- pushing dashboard snapshots and task updates over WebSocket
+
+Related backend modules:
+- [backend/app/moq_video.py](/root/lpx/webui/backend/app/moq_video.py:1): MOQ subscriber, discovered-track registry, WebTransport bridge, MJPEG bridge state
+- [backend/app/video_gateway.py](/root/lpx/webui/backend/app/video_gateway.py:1): shared video ingestion / frame / transcoding helper
+- [backend/app/video_stream.py](/root/lpx/webui/backend/app/video_stream.py:1): older stream registry and WebRTC signaling helpers still exposed by `main.py`
+
+### Optional standalone video service (`9006`)
+
+The separate `9006` service lives in [backend/app/video_9006/service.py](/root/lpx/webui/backend/app/video_9006/service.py:1) and is started by [start_video_service.sh](/root/lpx/webui/start_video_service.sh:1).
+
+This is not required for the main WebUI. It is a standalone video test/service path built on the shared [backend/app/video_gateway.py](/root/lpx/webui/backend/app/video_gateway.py:1).
+
+Important:
+- the React development server also uses port `9006`
+- do not run `npm start` and `start_video_service.sh` at the same time unless you change one of the ports
 
 ## Project Layout
 
@@ -32,44 +54,24 @@ webui/
 │   ├── app/
 │   │   ├── main.py
 │   │   ├── moq_video.py
-│   │   └── video_stream.py
+│   │   ├── video_gateway.py
+│   │   ├── video_stream.py
+│   │   └── video_9006/
+│   │       ├── __init__.py
+│   │       └── service.py
 │   ├── requirements.txt
 │   └── start.sh
 ├── frontend/
-│   ├── public/
 │   ├── src/
-│   │   ├── dashboard/
-│   │   │   ├── components/
-│   │   │   ├── pages/
-│   │   │   ├── i18n.ts
-│   │   │   └── types.ts
-│   │   ├── styles/
-│   │   ├── App.tsx
-│   │   └── index.tsx
+│   ├── public/
 │   ├── package.json
 │   └── build/
 ├── logs/
 ├── test/
 ├── API.md
-└── start_all.sh
+├── start_all.sh
+└── start_video_service.sh
 ```
-
-## Stack
-
-### Frontend
-
-- React 18
-- TypeScript
-- Tailwind CSS
-- `@xyflow/react` for topology/message-flow diagrams
-
-### Backend
-
-- FastAPI
-- WebSockets
-- `httpx`
-- SQLite-backed agent/task reads
-- Uvicorn
 
 ## Quick Start
 
@@ -89,11 +91,17 @@ Useful commands:
 ./start_all.sh stop
 ```
 
-The script:
-
+What `start_all.sh` does:
 - builds the React frontend
-- starts the FastAPI backend on `9005`
+- starts FastAPI on `9005`
 - serves the built frontend from the backend
+
+### Backend only
+
+```bash
+cd /root/lpx/webui/backend
+/root/lpx/webui/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9005
+```
 
 ### Frontend development mode
 
@@ -103,16 +111,25 @@ npm install
 npm start
 ```
 
-This starts the React dev server on `http://localhost:9006`.
+This starts the React development server on `http://localhost:9006`.
 
-### Backend only
+### Optional standalone video service on `9006`
 
 ```bash
-cd /root/lpx/webui/backend
-/root/lpx/webui/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9005
+cd /root/lpx/webui
+./start_video_service.sh
 ```
 
-## Main API Surface
+It exposes:
+- `GET /health`
+- `GET /video/streams`
+- `GET /video/player/{track_id}`
+- `GET /video/stream/{track_id}/mjpeg`
+- `GET /video/stream/{track_id}/latest`
+- `GET /video/stream/{track_id}/info`
+- `POST /video/ingest/{track_id}`
+
+## Main API Surface (`9005`)
 
 ### Core
 
@@ -134,33 +151,49 @@ cd /root/lpx/webui/backend
 - `POST /api/control/tasks`
 - `POST /api/control/tasks/{task_id}/stop`
 
-### Incoming ACN callbacks
-
-- `POST /acn/v3/pipeline-logs`
-- `POST /acn/v3/element-logs`
-- `POST /api/acn/v3/subscribe_track`
-
-### MOQ / video
+### MOQ / video track management
 
 - `GET /api/moq/status`
+- `GET /api/moq/tracks`
+- `POST /api/moq/tracks`
+- `DELETE /api/moq/tracks/{track_id}`
 - `POST /api/moq/subscribe`
+- `POST /api/moq/watch/{track_id}`
 - `POST /api/moq/unsubscribe/{track_id}`
 - `GET /api/moq/tracks/{track_id}/frames`
 - `POST /api/moq/auto-subscribe/{agent_id}`
+- `POST /api/acn/v3/subscribe_track`
+
+### Video playback endpoints
+
+- `GET /api/video/stream/{track_id}/mjpeg`
+- `GET /api/video/stream/{track_id}/latest`
+- `GET /api/video/stream/{track_id}/info`
+
+### Older stream / WebRTC endpoints
+
+These are still exposed from `main.py`, but they are not the primary MOQ/WebUI path:
+
 - `GET /api/video/streams`
 - `GET /api/video/streams/{agent_id}`
 - `POST /api/video/streams/{agent_id}/register`
+- `DELETE /api/video/streams/{stream_id}`
 - `POST /api/video/webrtc/offer`
 - `POST /api/video/webrtc/answer`
 - `POST /api/video/webrtc/ice`
 
+### Incoming ACN callbacks
+
+- `POST /acn/v3/pipeline-logs`
+- `POST /acn/v3/element-logs`
+
 More detail is in [API.md](/root/lpx/webui/API.md:1).
 
-## Data Sources And External Dependencies
+## Data Sources
 
-The dashboard is not self-contained. It reads from external ACN services and files:
+The dashboard is not self-contained. The current backend reads from external services and files:
 
-- Agent/task database:
+- agent/task database:
   - `/home/acn/zqm/acn_gw/agent_gw/agent_gw.db`
 - ACN Agent log:
   - `/home/acn/cxr/acn_agent/.acn_agent.log`
@@ -171,34 +204,42 @@ The dashboard is not self-contained. It reads from external ACN services and fil
 - ARF clear endpoint:
   - `http://localhost:9001/clear`
 
-The Overview `Network Element Status` section checks local reachability of these services. That check is real, but it is a port-level availability check, not a full application health check.
+## How Agent And Task Data Refresh
 
-## Frontend Pages
+### Agents
 
-- `Overview`
-  - live metrics
-  - network element status
-  - React Flow topology/message paths
-  - critical events feed
-- `Agents`
-  - current agent roster
-  - click a card to view details
-- `Network`
-  - backend logs
-  - tabbed ACN Agent / AgentGW / IDM logs
-  - inter-agent link summary
-- `Control`
-  - clear action with confirmation
-  - demo/test triggers
-  - task list and task dispatch/stop
-- `Settings`
-  - UI copy and policy-oriented informational settings
+- the database `agents` table is the source of truth for which agents exist
+- the backend rebuilds dashboard agent data from the DB plus transient runtime cache
+- the frontend mostly follows `GET /api/dashboard/overview` and `DASHBOARD_SNAPSHOT` WebSocket pushes
 
-## Test And Demo Utilities
+### Tasks
 
-The repo includes test utilities under `test/`.
+- active tasks come from the database `tasks` table
+- the backend combines DB tasks with in-memory task metadata and recent finished-task history
+- the frontend polls `GET /api/control/tasks` and also reacts to `TASKS_UPDATED` WebSocket pushes
 
-Most useful for the current UI:
+This means there is no direct SQLite change watcher. Sync is done by repeated backend reads plus WebSocket events generated by the backend.
+
+## Video / MOQ Notes
+
+The current WebUI video flow is:
+
+1. a publisher announces or publishes a MOQ track
+2. the backend discovers or manually registers that track
+3. the Agents page shows the track card
+4. clicking `Watch` triggers `POST /api/moq/watch/{track_id}`
+5. the backend subscribes to the real MOQ track using the saved `namespace` and `trackName`
+6. the browser renders via the WebUI playback bridge
+
+The Manage Track form can add or delete track cards. A manually added track only works if its `namespace` and `trackName` match the real published MOQ track.
+
+## Tests
+
+The current test guidance is in [test/README_TEST.md](/root/lpx/webui/test/README_TEST.md:1).
+
+Most useful current paths:
+
+### Dashboard message/demo flow
 
 ```bash
 cd /root/lpx/webui
@@ -206,17 +247,28 @@ python3 test/test_messages.py --topology-demo --host 127.0.0.1 --port 9005
 python3 test/test_messages.py --full-demo --host 127.0.0.1 --port 9005
 ```
 
-The WebUI also exposes demo buttons in the UI for:
+### Manual MOQ WebUI video demo
 
-- topology test flow
-- full dashboard demo flow
+```bash
+cd /root/lpx/webui
+./test/run_moq_video_ui_demo.sh start
+./test/run_moq_video_ui_demo.sh status
+./test/run_moq_video_ui_demo.sh stop
+```
+
+### Automated MOQ WebUI E2E
+
+```bash
+cd /root/lpx/webui
+python3 test/moq_video_webui_e2e.py
+```
 
 ## Logs
 
-WebUI runtime logs are written to:
-
+Useful runtime logs:
 - backend log: `logs/backend.log`
 - frontend build log: `logs/frontend_build.log`
+- MOQ manual demo log: `logs/moq_video_ui_demo.log`
 
 ## Common Problems
 
@@ -230,20 +282,40 @@ tail -f logs/backend.log
 tail -f logs/frontend_build.log
 ```
 
-### Frontend cannot reach backend in development mode
+### Frontend dev mode conflicts with the standalone video service
 
-Use the React dev server on `9006` and make sure the backend is running on `9005`.
+Both want port `9006`.
+
+Use one of these at a time:
+- `cd frontend && npm start`
+- `./start_video_service.sh`
+
+### MOQ track card exists but playback does not start
+
+Check:
+
+```bash
+curl -s http://localhost:9005/api/moq/tracks | python3 -m json.tool
+curl -s http://localhost:9005/api/video/stream/<track_id>/info | python3 -m json.tool
+```
+
+Look at:
+- `watchState`
+- `has_metadata`
+- `has_init_segment`
+- `fragment_count`
+- `has_frame`
 
 ### Overview status looks wrong
 
-The `Network Element Status` cards only show whether the local port/listener is reachable. A process can still be unhealthy while showing `online`.
+The Network Element Status cards only show local port reachability. A process can still be unhealthy while showing `online`.
 
 ### Clear does not fully remove visible agents
 
-The WebUI merges database-backed agent identity with live runtime cache. If you change the external AgentGW/ARF data source, the WebUI reflects the database view plus fresh runtime events.
+The backend merges database-backed identity with runtime cache. If the external AgentGW/ARF side still represents those agents, they can reappear after refresh.
 
 ## Notes
 
-- The current dashboard is localized for English and Chinese.
-- Theme defaults to light mode.
-- The React Flow topology is intentionally presentation-oriented and driven by recent message-flow events rather than a full persisted network graph.
+- the current dashboard supports English and Chinese
+- the default product path is the integrated `9005` WebUI
+- the `9006` service is optional and mainly useful for standalone video testing

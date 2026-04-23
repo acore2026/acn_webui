@@ -1,7 +1,7 @@
 #!/bin/bash
 # Start Video Service on port 9006
 
-cd /root/lpx/webui/backend/app
+cd /root/lpx/webui/backend
 
 # Check if already running
 if lsof -ti:9006 > /dev/null 2>&1; then
@@ -13,7 +13,7 @@ if lsof -ti:9006 > /dev/null 2>&1; then
 fi
 
 echo "Starting Video Service on port 9006..."
-python3 video_service.py &
+python3 -m app.video_9006.service &
 
 sleep 2
 
@@ -31,6 +31,4 @@ echo "  - http://localhost:9006/video/stream/{track_id}/mjpeg"
 echo "  - http://localhost:9006/video/stream/{track_id}/latest"
 echo "  - http://localhost:9006/video/stream/{track_id}/info"
 echo "  - http://localhost:9006/video/player/{track_id}"
-echo ""
-echo "Test page: file:///root/lpx/webui/test_video_9006.html"
 echo ""

@@ -5,53 +5,25 @@ Runs on port 9006, integrates with existing WebUI
 """
 
 import asyncio
-import sys
-from pathlib import Path
+import logging
 from contextlib import asynccontextmanager
 
-# Add parent paths
-WEBUI_ROOT = Path(__file__).parent.parent.parent
-sys.path.insert(0, str(WEBUI_ROOT))
-
-from fastapi import FastAPI, Request, Response, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, JSONResponse, HTMLResponse
 import uvicorn
-import logging
+from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+
+from ..video_gateway import (
+    VideoFormat,
+    VideoFrame,
+    get_video_gateway,
+    ingest_h264_frame,
+    ingest_jpeg_frame,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Import video gateway
-try:
-    from .video_gateway import (
-        MultiFormatVideoGateway,
-        VideoFormat,
-        VideoFrame,
-        ingest_h264_frame,
-        ingest_jpeg_frame,
-        get_video_gateway,
-    )
-
-    GATEWAY_AVAILABLE = True
-except ImportError:
-    # Fallback - try absolute import
-    try:
-        from backend.app.video_gateway import (
-            MultiFormatVideoGateway,
-            VideoFormat,
-            VideoFrame,
-            ingest_h264_frame,
-            ingest_jpeg_frame,
-            get_video_gateway,
-        )
-
-        GATEWAY_AVAILABLE = True
-    except ImportError as e:
-        logger.error(f"Video gateway not available: {e}")
-        GATEWAY_AVAILABLE = False
-
 
 # Global gateway instance
 gateway = None
@@ -66,12 +38,9 @@ async def lifespan(app: FastAPI):
     logger.info("Video Service Starting")
     logger.info("=" * 70)
 
-    if GATEWAY_AVAILABLE:
-        gateway = get_video_gateway()
-        await gateway.start()
-        logger.info("✅ Video Gateway initialized")
-    else:
-        logger.warning("⚠️  Video Gateway not available")
+    gateway = get_video_gateway()
+    await gateway.start()
+    logger.info("✅ Video Gateway initialized")
 
     yield
 
@@ -80,7 +49,6 @@ async def lifespan(app: FastAPI):
         logger.info("Video Gateway stopped")
 
 
-# Create FastAPI app
 app = FastAPI(
     title="Video Service",
     description="Multi-format video streaming service",
@@ -88,7 +56,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -105,7 +72,6 @@ async def root():
         "service": "Video Service",
         "version": "1.0.0",
         "port": 9006,
-        "gateway_available": GATEWAY_AVAILABLE,
         "endpoints": [
             "/video/stream/{track_id}/mjpeg",
             "/video/stream/{track_id}/latest",
@@ -122,7 +88,7 @@ async def health():
     """Health check"""
     return {
         "status": "healthy",
-        "gateway": GATEWAY_AVAILABLE,
+        "gateway": True,
         "streams": len(gateway.latest_frames) if gateway else 0,
     }
 
@@ -146,16 +112,15 @@ async def mjpeg_stream(track_id: str, request: Request):
                 if queue.full():
                     try:
                         queue.get_nowait()
-                    except:
+                    except Exception:
                         pass
                 queue.put_nowait(frame)
-            except:
+            except Exception:
                 pass
 
         gateway.subscribe(track_id, on_frame)
 
         try:
-            # Send initial frame
             frame = gateway.get_latest_frame(track_id)
             if frame and frame.format == VideoFormat.RAW_JPEG:
                 yield (
@@ -164,12 +129,10 @@ async def mjpeg_stream(track_id: str, request: Request):
                     b"\r\n" + frame.data + b"\r\n"
                 )
 
-            # Stream new frames
             while True:
                 try:
                     frame = await asyncio.wait_for(queue.get(), timeout=30.0)
 
-                    # Get JPEG data
                     if frame.format != VideoFormat.RAW_JPEG:
                         frame = await gateway.get_frame_async(
                             track_id, VideoFormat.RAW_JPEG
@@ -211,7 +174,6 @@ async def latest_frame(track_id: str):
     if not frame:
         raise HTTPException(status_code=404, detail="No frame available")
 
-    # Convert to JPEG if needed
     if frame.format != VideoFormat.RAW_JPEG:
         frame = await gateway.get_frame_async(track_id, VideoFormat.RAW_JPEG)
 
@@ -304,13 +266,13 @@ async def video_player(track_id: str, request: Request):
 <body>
     <h1>🔴 Video Player</h1>
     <p>Track: <code>{track_id}</code></p>
-    
+
     <div class="video-box">
-        <img src="{base_url}/video/stream/{track_id}/mjpeg" 
-             width="640" height="360" 
+        <img src="{base_url}/video/stream/{track_id}/mjpeg"
+             width="640" height="360"
              alt="Video Stream" />
     </div>
-    
+
     <div class="info">
         <h3>Endpoints:</h3>
         <div class="endpoint">
@@ -326,9 +288,8 @@ async def video_player(track_id: str, request: Request):
             <code>{base_url}/video/stream/{track_id}/info</code>
         </div>
     </div>
-    
+
     <script>
-        // Auto-refresh stream info
         async function updateInfo() {{
             try {{
                 const res = await fetch('{base_url}/video/stream/{track_id}/info');
@@ -374,12 +335,13 @@ async def ingest_frame(track_id: str, request: Request):
                     "size": len(data),
                 }
             )
-        else:
-            raise HTTPException(status_code=400, detail="Failed to ingest frame")
+        raise HTTPException(status_code=400, detail="Failed to ingest frame")
 
-    except Exception as e:
-        logger.error(f"Ingest error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"Ingest error: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/video/streams")
@@ -404,14 +366,12 @@ async def list_streams():
     return JSONResponse({"streams": streams, "count": len(streams)})
 
 
-# Test endpoints
 @app.post("/video/test/ingest-jpeg/{track_id}")
 async def test_ingest_jpeg(track_id: str):
     """Test endpoint - ingest fake JPEG"""
     if not gateway:
         raise HTTPException(status_code=503, detail="Video gateway not available")
 
-    # Create fake JPEG
     jpeg_data = b"\xff\xd8\xff\xe0\x00\x10JFIF" + b"\x00" * 1000 + b"\xff\xd9"
 
     success = await ingest_jpeg_frame(
@@ -431,7 +391,6 @@ async def test_ingest_h264(track_id: str):
     if not gateway:
         raise HTTPException(status_code=503, detail="Video gateway not available")
 
-    # Create fake H.264 NAL unit
     h264_data = b"\x00\x00\x00\x01\x09\x10" + b"\x00" * 100
 
     success = await ingest_h264_frame(
@@ -448,7 +407,11 @@ async def test_ingest_h264(track_id: str):
 def run_server():
     """Run the video service"""
     uvicorn.run(
-        "video_service:app", host="0.0.0.0", port=9006, log_level="info", reload=False
+        "app.video_9006.service:app",
+        host="0.0.0.0",
+        port=9006,
+        log_level="info",
+        reload=False,
     )
 
 

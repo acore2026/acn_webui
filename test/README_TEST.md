@@ -1,198 +1,222 @@
 # MOQ Video Test 运行指南
 
-## 测试环境要求
+## 当前推荐的测试
 
-1. **FFmpeg** - 用于生成 H.264 测试视频
+这个目录现在保留两条主路径：
+
+1. **WebUI 手动演示**
+   脚本：`moq_video_ui_demo.py`
+   封装：`run_moq_video_ui_demo.sh`
+
+2. **WebUI 自动化端到端测试**
+   脚本：`moq_video_webui_e2e.py`
+
+另外保留了一组低层 MOQ 工具：
+- `moq_relay.py`
+- `moq_publisher.py`
+- `moq_subscriber.py`
+- `run_test.sh`
+
+## 环境要求
+
+1. **FFmpeg**
    ```bash
    apt-get update && apt-get install -y ffmpeg
    ```
 
-2. **Python 依赖** - webui 目录下的 MOQ 模块
-   ```bash
-   cd /root/lpx/webui
-   pip install -e .  # 或确保依赖已安装
-   ```
+2. **WebUI 后端**
+   默认地址：`http://localhost:9005`
 
-3. **MOQ Relay** - 使用 agent_gw 的 relay（端口 9003）
+3. **MOQ Relay**
+   当前测试默认使用 AgentGW 的 relay：`127.0.0.1:9003`
 
-## 测试脚本说明
+4. **Playwright CLI**
+   只有自动化 E2E 测试需要
 
-### 1. H.264 视频测试（推荐）
+## 1. 手动演示：moq_video_ui_demo.py
 
-生成真实 H.264 视频并通过 MOQ 传输：
+这是当前最适合人工联调 WebUI 的脚本。
 
+启动：
 ```bash
-cd /root/lpx/webui/test
-python3 test_h264_video.py
+cd /root/lpx/webui
+./test/run_moq_video_ui_demo.sh start
 ```
 
-**参数配置（在脚本内修改）：**
-- `VIDEO_DURATION = 10` - 视频时长（秒）
-- `VIDEO_FPS = 30` - 帧率
-- `VIDEO_WIDTH = 640` - 宽度
-- `VIDEO_HEIGHT = 360` - 高度
-- `TASK_ID = "task-c2a09"` - 任务 ID（需与 WebUI 订阅的一致）
-- `AGENT_ID = "did:udid:..."` - Agent ID
-
-### 2. 简单测试（快速验证）
-
-发送简单的 PNG 图片：
-
+查看状态：
 ```bash
-cd /root/lpx/webui/test
-python3 test_simple_moq.py
+./test/run_moq_video_ui_demo.sh status
 ```
 
-### 3. 基础 MOQ 测试（独立 relay）
+停止：
+```bash
+./test/run_moq_video_ui_demo.sh stop
+```
 
-启动独立 relay 并测试 pub/sub：
+日志：
+```bash
+tail -f /root/lpx/webui/logs/moq_video_ui_demo.log
+```
+
+这个脚本会：
+- 用 `ffmpeg` 生成实时 H.264 fMP4 测试流
+- 发布到 MOQ relay `9003`
+- 调用 `/api/acn/v3/subscribe_track`
+- 在 WebUI 中生成一个 `Video` 轨道卡片
+- 等待你在 WebUI 中点击 `Watch`
+
+默认轨道：
+- `agent_id = did:acn:agent:test-video`
+- `task_id = task-video-demo`
+- `track_name = Video`
+
+在 WebUI 中操作：
+1. 打开 `http://localhost:9005`
+2. 进入 `Agents`
+3. 找到 `Video` 卡片
+4. 点击 `Watch`
+
+## 2. 自动化端到端：moq_video_webui_e2e.py
+
+这个脚本会自动：
+- 发布视频
+- 通知后端发现轨道
+- 打开 WebUI
+- 点击 `Agents -> Watch`
+- 校验页面开始渲染
+
+运行：
+```bash
+cd /root/lpx/webui
+python3 test/moq_video_webui_e2e.py
+```
+
+如果 Playwright Chromium 未安装：
+```bash
+HOME=/tmp XDG_CACHE_HOME=/tmp playwright-cli install-browser chromium
+```
+
+## 3. 低层 MOQ 联调
+
+如果你只想验证 MOQ pub/sub，不关心 WebUI：
 
 ```bash
 cd /root/lpx/webui/test
 
-# 终端 1：启动 relay
+# 终端 1
 python3 moq_relay.py
 
-# 终端 2：启动 subscriber
+# 终端 2
 python3 moq_subscriber.py
 
-# 终端 3：启动 publisher
+# 终端 3
 python3 moq_publisher.py
 ```
 
-或使用自动化脚本：
+或直接：
 ```bash
-chmod +x run_test.sh
 ./run_test.sh
 ```
 
-## 验证测试结果
+说明：
+- `moq_relay.py` 使用测试 relay 端口 `9004`
+- `moq_publisher.py` 发布测试对象到 `9004`
+- `moq_subscriber.py` 默认订阅的是 `9003` 上的真实 relay，和上面两个脚本不是同一套端口
 
-### 1. 检查 WebUI 状态
+因此如果你要把这三者一起跑，先确认端口配置一致。
 
+## 4. 其他保留测试
+
+### test_moq_integration.py
+隔离的 relay -> publisher -> subscriber 集成检查：
+```bash
+python3 test/test_moq_integration.py
+```
+
+### test_multi_format.py
+后端视频网关格式处理测试：
+```bash
+python3 test/test_multi_format.py
+```
+
+### test_messages.py
+往后端注入 pipeline / element 日志，验证看板消息与状态展示：
+```bash
+python3 test/test_messages.py --all --count 1
+```
+
+## 常用排查命令
+
+查看后端 MOQ 状态：
 ```bash
 curl -s http://localhost:9005/api/moq/status | python3 -m json.tool
 ```
 
-**期望输出：**
-```json
-{
-  "connected": true,
-  "subscribed_tracks": ["..._task-c2a09_video"],
-  "subscription_debug": [{
-    "state": "received",
-    "object_count": 123,
-    "buffered_frames": 30
-  }]
-}
+查看轨道列表：
+```bash
+curl -s http://localhost:9005/api/moq/tracks | python3 -m json.tool
 ```
 
-### 2. 查看接收到的帧
-
+查看单个轨道帧缓存：
 ```bash
 curl -s http://localhost:9005/api/moq/tracks/<track_id>/frames | python3 -m json.tool
 ```
 
-获取 track_id：
+查看视频流状态：
 ```bash
-curl -s http://localhost:9005/api/moq/status | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['subscribed_tracks'][0])"
+curl -s http://localhost:9005/api/video/stream/<track_id>/info | python3 -m json.tool
 ```
 
-### 3. 在浏览器中查看
-
-1. 打开 `http://localhost:9005`
-2. 登录 WebUI
-3. 查看视频卡片区域
-4. 打开浏览器开发者工具（F12）
-5. 检查 Console 和 Network 标签
+查看后端日志：
+```bash
+tail -f /root/lpx/webui/logs/backend.log | grep -i "moq\\|video\\|watch\\|fragment\\|jpeg"
+```
 
 ## 常见问题
 
-### Q: FFmpeg 未安装
+### Q: WebUI 没看到新轨道
+- 确认脚本已经成功调用 `/api/acn/v3/subscribe_track`
+- 执行：
+  ```bash
+  curl -s http://localhost:9005/api/moq/tracks | python3 -m json.tool
+  ```
+- 如果轨道已经存在但 `watchState` 是 `available`，说明还没有点击 `Watch`
+
+### Q: 点击 Watch 后页面没有画面
+- 检查：
+  ```bash
+  curl -s http://localhost:9005/api/video/stream/<track_id>/info | python3 -m json.tool
+  ```
+- 重点看：
+  - `has_metadata`
+  - `has_init_segment`
+  - `fragment_count`
+  - `has_frame`
+  - `jpeg_sequence`
+
+### Q: relay 9003 不通
+- 检查 AgentGW 是否在运行
+- 检查 WebUI 后端是否已连接 relay：
+  ```bash
+  curl -s http://localhost:9005/api/moq/status | python3 -m json.tool
+  ```
+
+### Q: 需要停止手动 demo
 ```bash
-# Ubuntu/Debian
-apt-get update && apt-get install -y ffmpeg
-
-# CentOS/RHEL
-yum install -y ffmpeg
-
-# 或从源码编译
+cd /root/lpx/webui
+./test/run_moq_video_ui_demo.sh stop
 ```
 
-### Q: 端口 9003 被占用
-```bash
-# 检查占用
-lsof -i :9003
+## 当前建议
 
-# 杀死进程（如果是 agent_gw）
-pkill -f agent_gw
+如果你要测 WebUI 视频链路，优先用下面两种：
 
-# 或修改测试脚本使用其他端口
-RELAY_PORT = 9004  # 在 test_h264_video.py 中修改
-```
+1. 手动联调：
+   ```bash
+   ./test/run_moq_video_ui_demo.sh start
+   ```
 
-### Q: WebUI 未订阅正确的 track
-```bash
-# 查看当前订阅
-curl -s http://localhost:9005/api/moq/status | python3 -m json.tool
-
-# 修改测试脚本中的 TASK_ID 和 AGENT_ID 匹配 WebUI 订阅
-```
-
-### Q: 前端不显示视频
-1. 检查浏览器是否支持 WebCodecs API
-2. 检查 Console 是否有解码错误
-3. 检查 Network 中 WebSocket 连接
-
-## 调试技巧
-
-### 1. 查看后端日志
-```bash
-tail -f /root/lpx/webui/logs/backend.log | grep -i "moq\|video\|object"
-```
-
-### 2. 检查 MOQ 消息流
-```bash
-# 在浏览器开发者工具中过滤：
-# WebSocket 消息包含 "MOQ_VIDEO" 或 "VIDEO_FRAME"
-```
-
-### 3. 测试数据格式
-```bash
-# 检查接收到的帧大小分布
-curl -s http://localhost:9005/api/moq/tracks/<track_id>/frames | python3 -c "
-import json,sys
-data = json.load(sys.stdin)
-for f in data['frames'][:5]:
-    print(f\"ID: {f['object_id']}, Size: {f['payload_size']}, Type: {f['frame_type']}\")
-"
-```
-
-## 自动化测试流程
-
-一键运行完整测试：
-
-```bash
-cd /root/lpx/webui/test
-
-# 1. 确保 agent_gw 在运行（或 WebUI 已连接到 relay）
-curl -s http://localhost:9003 > /dev/null && echo "Relay OK" || echo "Relay not available"
-
-# 2. 运行 H.264 测试
-python3 test_h264_video.py
-
-# 3. 检查结果
-echo "=== Checking WebUI Status ==="
-curl -s http://localhost:9005/api/moq/status | python3 -c "
-import json,sys
-d = json.load(sys.stdin)
-for sub in d.get('subscription_debug', []):
-    print(f\"Track: {sub['track_id']}\")
-    print(f\"  State: {sub['state']}\")
-    print(f\"  Objects: {sub['object_count']}\")
-    print(f\"  Frames: {sub['buffered_frames']}\")
-"
-
-# 4. 打开浏览器查看（在本地机器上）
-echo "=== Open browser at http://$(hostname -I | awk '{print $1}'):9005 ==="
-```
+2. 自动化联调：
+   ```bash
+   python3 test/moq_video_webui_e2e.py
+   ```
