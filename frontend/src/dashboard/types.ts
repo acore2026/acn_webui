@@ -120,20 +120,12 @@ export interface CertificateRecord {
   uploadedAt?: string;
 }
 
-export interface DirectDemoCameraConfig {
-  enabled: boolean;
-  running: boolean;
-  trackAvailable: boolean;
-  trackId: string;
-  trackName: string;
-}
-
 export interface VideoTrackModel {
   trackId: string;
   namespace: string;
   trackName: string;
   normalizedTrackName: string;
-  source?: 'moq' | 'manual' | 'direct';
+  source?: 'moq' | 'manual';
   agentId: string;
   taskId: string;
   discoveredAt: string;
@@ -154,10 +146,8 @@ export interface VideoTrackModel {
 }
 
 export interface VideoTrackDraft {
-  agentId: string;
-  taskId: string;
   trackName: string;
-  namespace?: string;
+  namespace: string;
 }
 
 export interface VideoPlayerConfig {

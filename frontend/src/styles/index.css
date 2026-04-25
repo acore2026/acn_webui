@@ -224,6 +224,67 @@
     backdrop-filter: blur(12px);
   }
 
+  .moq-videos-panel {
+    @apply flex flex-col;
+  }
+
+  .moq-videos-header {
+    @apply mb-3 flex items-center justify-between gap-3;
+  }
+
+  .moq-connection-text {
+    @apply rounded px-2.5 py-1 text-xs font-semibold uppercase tracking-[0.16em];
+    background: var(--accent-cyan-bg);
+    color: var(--accent-cyan-text);
+  }
+
+  .moq-video-grid {
+    @apply flex flex-col gap-4 p-2;
+  }
+
+  .moq-video-card {
+    @apply relative overflow-hidden rounded-[10px] border-2;
+    background: var(--surface-soft);
+    border-color: var(--accent-cyan-border);
+    box-shadow: 0 0 22px rgba(34, 211, 238, 0.14);
+  }
+
+  .moq-video-card::before {
+    @apply absolute left-3 top-3 z-10 rounded px-2.5 py-1 text-xs font-bold;
+    content: "MOQ";
+    color: #ffffff;
+    background: var(--accent-cyan-text);
+  }
+
+  .moq-video-container {
+    @apply relative flex items-center justify-center overflow-hidden;
+    aspect-ratio: 16 / 9;
+    background:
+      linear-gradient(135deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.98));
+  }
+
+  .moq-video-surface {
+    @apply relative h-full w-full;
+    background: #05070c;
+  }
+
+  .moq-video-info {
+    @apply flex items-center justify-between gap-3 border-t px-3 py-3;
+    background: var(--surface-soft);
+    border-color: var(--border-soft);
+  }
+
+  .moq-video-track {
+    @apply min-w-0 truncate text-sm font-bold;
+    color: var(--text-main);
+  }
+
+  .moq-video-status {
+    @apply max-w-[42%] text-right text-xs;
+    color: var(--accent-cyan-text);
+    overflow-wrap: anywhere;
+  }
+
   .theme-nav-button {
     background: var(--surface-soft);
     border-color: rgba(255, 255, 255, 0.05);

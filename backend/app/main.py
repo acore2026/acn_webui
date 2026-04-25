@@ -8,6 +8,7 @@ Port: 9005
 import asyncio
 import base64
 import json
+import os
 import secrets
 import socket
 import sqlite3
@@ -26,13 +27,11 @@ from contextlib import asynccontextmanager
 import uvicorn
 from typing import List, Dict, Any, Optional
 import httpx
-from PIL import Image, ImageDraw
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
 # Import video stream manager
 from .video_stream import video_stream_manager, StreamStatus
-from .video_gateway import get_video_gateway, ingest_jpeg_frame
 
 # Import MOQ video subscriber
 try:
@@ -48,13 +47,10 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 EXTERNAL_DB_DEFAULT_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
 LOCAL_CACHE_DB_PATH = ROOT_DIR / "logs" / "webui_local_state.db"
 DATA_SOURCE_SETTINGS_PATH = ROOT_DIR / "logs" / "data_source_settings.json"
-DIRECT_DEMO_SETTINGS_PATH = ROOT_DIR / "logs" / "direct_demo_settings.json"
 CERT_DB_PATH = ROOT_DIR / "logs" / "certificates.db"
 CERT_STORAGE_DIR = ROOT_DIR / "logs" / "cert_store"
 IDM_CERT_UPLOAD_URL = "http://127.0.0.1:9020/idm/v1/cert-upload"
 IDM_CERT_DELETE_URL = "http://127.0.0.1:9020/idm/v1/cert-delete"
-# DB_PATH = "/root/lpx/webui/test/test_agent_gw.db"
-
 # ARF Service Configuration
 ARF_HOST = "localhost"  # ARF service host
 ARF_CLEAR_URL = f"http://{ARF_HOST}:9001/clear"
@@ -62,13 +58,6 @@ LOCAL_STATUS_HOST = "127.0.0.1"
 AGENT_GW_LOG_DIR = Path("/home/acn/zqm/acn_gw/agent_gw/logs")
 IDM_LOG_DIR = Path("/home/acn/cx/idm/logs")
 ACN_AGENT_LOG_FILE = Path("/home/acn/cxr/acn_agent/.acn_agent.log")
-DIRECT_VIDEO_TRACK_ID = "direct-demo-camera"
-DIRECT_VIDEO_AGENT_ID = "did:acn:agent:direct-demo"
-DIRECT_VIDEO_TASK_ID = "task-direct-demo"
-DIRECT_VIDEO_NAMESPACE = f"/{DIRECT_VIDEO_TASK_ID}/{DIRECT_VIDEO_AGENT_ID}"
-DIRECT_VIDEO_TRACKS: Dict[str, Dict[str, Any]] = {}
-direct_video_demo_task: Optional[asyncio.Task] = None
-
 ELEMENT_PORTS = [
     {
         "id": "acn-agent",
@@ -177,20 +166,15 @@ NETWORK_ELEMENT_LOG_SOURCES = [
 ]
 
 DATA_SOURCE_SETTINGS_LOCK = threading.Lock()
-DIRECT_DEMO_SETTINGS_LOCK = threading.Lock()
 DEFAULT_DATA_SOURCE_SETTINGS = {
     "useExternalDb": True,
     "externalDbPath": EXTERNAL_DB_DEFAULT_PATH,
-}
-DEFAULT_DIRECT_DEMO_SETTINGS = {
-    "enabled": True,
 }
 
 
 def _ensure_runtime_dirs() -> None:
     LOCAL_CACHE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     DATA_SOURCE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DIRECT_DEMO_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     CERT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     CERT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -228,45 +212,11 @@ def _save_data_source_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
-def _load_direct_demo_settings() -> Dict[str, Any]:
-    _ensure_runtime_dirs()
-    if not DIRECT_DEMO_SETTINGS_PATH.exists():
-        return dict(DEFAULT_DIRECT_DEMO_SETTINGS)
-
-    try:
-        raw = json.loads(DIRECT_DEMO_SETTINGS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return dict(DEFAULT_DIRECT_DEMO_SETTINGS)
-
-    settings = dict(DEFAULT_DIRECT_DEMO_SETTINGS)
-    if isinstance(raw, dict):
-        settings["enabled"] = bool(raw.get("enabled", settings["enabled"]))
-    return settings
-
-
-def _save_direct_demo_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = {
-        "enabled": bool(settings.get("enabled", True)),
-    }
-    _ensure_runtime_dirs()
-    with DIRECT_DEMO_SETTINGS_LOCK:
-        DIRECT_DEMO_SETTINGS_PATH.write_text(
-            json.dumps(normalized, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
-    return normalized
-
-
 data_source_settings: Dict[str, Any] = _load_data_source_settings()
-direct_demo_settings: Dict[str, Any] = _load_direct_demo_settings()
 
 
 def get_data_source_settings() -> Dict[str, Any]:
     return dict(data_source_settings)
-
-
-def get_direct_demo_settings() -> Dict[str, Any]:
-    return dict(direct_demo_settings)
 
 
 def get_external_db_path() -> str:
@@ -1142,64 +1092,12 @@ manager = ConnectionManager()
 
 # Set connection manager for video stream manager
 video_stream_manager.set_connection_manager(manager)
-video_gateway = get_video_gateway()
-
-
-def _build_direct_video_track(track_id: str = DIRECT_VIDEO_TRACK_ID) -> Dict[str, Any]:
-    now_iso = datetime.utcnow().isoformat()
-    existing = DIRECT_VIDEO_TRACKS.get(track_id)
-    watch_state = existing.get("watchState", "available") if existing else "available"
-    discovered_at = existing.get("discoveredAt", now_iso) if existing else now_iso
-    last_seen = existing.get("lastSeen", now_iso) if existing else now_iso
-    seen_count = int(existing.get("seenCount", 1)) if existing else 1
-    metadata = existing.get("metadata") if existing else None
-
-    return {
-        "trackId": track_id,
-        "namespace": DIRECT_VIDEO_NAMESPACE,
-        "trackName": "Direct Demo Camera",
-        "normalizedTrackName": "video",
-        "agentId": DIRECT_VIDEO_AGENT_ID,
-        "taskId": DIRECT_VIDEO_TASK_ID,
-        "discoveredAt": discovered_at,
-        "lastSeen": last_seen,
-        "seenCount": seen_count,
-        "watchState": watch_state,
-        "lastError": None,
-        "metadata": metadata,
-        "lastObjectAt": last_seen,
-        "source": "direct",
-    }
-
-
-def _upsert_direct_video_track(
-    track_id: str = DIRECT_VIDEO_TRACK_ID,
-    *,
-    watch_state: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    track = _build_direct_video_track(track_id)
-    existing = DIRECT_VIDEO_TRACKS.get(track_id)
-    if existing:
-        track["discoveredAt"] = existing.get("discoveredAt", track["discoveredAt"])
-        track["seenCount"] = int(existing.get("seenCount", 1)) + 1
-        track["metadata"] = metadata if metadata is not None else existing.get("metadata")
-        track["watchState"] = watch_state or existing.get("watchState", track["watchState"])
-    else:
-        track["metadata"] = metadata
-        if watch_state:
-            track["watchState"] = watch_state
-    track["lastSeen"] = datetime.utcnow().isoformat()
-    track["lastObjectAt"] = track["lastSeen"]
-    DIRECT_VIDEO_TRACKS[track_id] = track
-    return track
 
 
 def _list_all_video_tracks() -> List[Dict[str, Any]]:
     tracks: List[Dict[str, Any]] = []
     if MOQ_AVAILABLE:
         tracks.extend(moq_video_subscriber.list_discovered_tracks())
-    tracks.extend(DIRECT_VIDEO_TRACKS.values())
     return sorted(tracks, key=lambda item: item.get("lastSeen") or "", reverse=True)
 
 
@@ -1213,59 +1111,6 @@ async def _broadcast_video_tracks() -> None:
             },
         }
     )
-
-
-def _clear_direct_video_runtime(track_id: str = DIRECT_VIDEO_TRACK_ID) -> None:
-    DIRECT_VIDEO_TRACKS.pop(track_id, None)
-    video_gateway.latest_frames.pop(track_id, None)
-    video_gateway.buffers.pop(track_id, None)
-    video_gateway.subscribers.pop(track_id, None)
-
-
-async def _start_direct_video_demo_if_needed() -> bool:
-    global direct_video_demo_task
-    if not bool(direct_demo_settings.get("enabled", True)):
-        return False
-    if direct_video_demo_task and not direct_video_demo_task.done():
-        return True
-
-    _upsert_direct_video_track()
-    direct_video_demo_task = asyncio.create_task(_run_direct_video_demo())
-    add_log_entry("[Direct Demo Camera] Demo camera opened.", "info")
-    await _broadcast_video_tracks()
-    return True
-
-
-async def _stop_direct_video_demo(track_id: str = DIRECT_VIDEO_TRACK_ID) -> bool:
-    global direct_video_demo_task
-    task_existed = direct_video_demo_task is not None
-    track_existed = track_id in DIRECT_VIDEO_TRACKS
-    if direct_video_demo_task:
-        direct_video_demo_task.cancel()
-        try:
-            await direct_video_demo_task
-        except asyncio.CancelledError:
-            pass
-        direct_video_demo_task = None
-
-    _clear_direct_video_runtime(track_id)
-    if task_existed or track_existed:
-        add_log_entry("[Direct Demo Camera] Demo camera closed.", "info")
-    await _broadcast_video_tracks()
-    return True
-
-
-def _get_direct_demo_camera_status() -> Dict[str, Any]:
-    enabled = bool(direct_demo_settings.get("enabled", True))
-    running = bool(direct_video_demo_task and not direct_video_demo_task.done())
-    track_available = DIRECT_VIDEO_TRACK_ID in DIRECT_VIDEO_TRACKS
-    return {
-        "enabled": enabled,
-        "running": running,
-        "trackAvailable": track_available,
-        "trackId": DIRECT_VIDEO_TRACK_ID,
-        "trackName": "Direct Demo Camera",
-    }
 
 
 def _normalize_virtual_agent_capabilities(value: Any) -> List[str]:
@@ -1379,59 +1224,6 @@ async def add_virtual_agent(request: Dict[str, Any]) -> Dict[str, Any]:
         "dashboard": dashboard,
         "tasks": tasks,
     }
-
-
-async def _run_direct_video_demo(track_id: str = DIRECT_VIDEO_TRACK_ID):
-    frame_index = 0
-    width, height = 960, 540
-    fps = 30
-    base_metadata = {
-        "type": "direct-demo-stream",
-        "codec": "JPEG",
-        "container": "MJPEG",
-        "mime_type": "image/jpeg",
-        "width": width,
-        "height": height,
-        "fps": fps,
-        "mode": "direct",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _upsert_direct_video_track(track_id, watch_state="available", metadata=base_metadata)
-    await _broadcast_video_tracks()
-
-    while True:
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        image = Image.new(
-            "RGB",
-            (width, height),
-            color=(
-                (40 + frame_index * 7) % 180,
-                (90 + frame_index * 5) % 180,
-                (140 + frame_index * 3) % 180,
-            ),
-        )
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((28, 28, width - 28, height - 28), radius=28, outline=(240, 248, 255), width=4)
-        draw.text((60, 70), "Direct WebUI Video Demo", fill=(255, 255, 255))
-        draw.text((60, 130), f"Track: {track_id}", fill=(235, 245, 255))
-        draw.text((60, 190), f"Frame: {frame_index}", fill=(235, 245, 255))
-        draw.text((60, 250), timestamp, fill=(255, 230, 190))
-        draw.ellipse((width - 170, 58, width - 90, 138), fill=(34, 197, 94), outline=(255, 255, 255), width=3)
-        draw.text((width - 150, 152), "LIVE", fill=(255, 255, 255))
-
-        import io
-
-        buffer = io.BytesIO()
-        image.save(buffer, format="JPEG", quality=85)
-        frame_metadata = {
-            **base_metadata,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-            "frame_index": frame_index,
-        }
-        await ingest_jpeg_frame(track_id, buffer.getvalue(), frame_metadata)
-        _upsert_direct_video_track(track_id, metadata=base_metadata)
-        frame_index += 1
-        await asyncio.sleep(1 / fps)
 
 
 # Database helper
@@ -3500,21 +3292,19 @@ def _infer_moq_codec(payload: bytes) -> str | None:
 # Lifespan context
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    webui_scheme = os.environ.get("WEBUI_SCHEME", "https").lower()
+    websocket_scheme = "wss" if webui_scheme == "https" else "ws"
     print("=" * 60)
     print("ACN Agent Monitor Backend Starting...")
     print("=" * 60)
-    print(f"API: http://0.0.0.0:9005")
-    print(f"WebSocket: ws://0.0.0.0:9005/ws")
+    print(f"API: {webui_scheme}://0.0.0.0:9005")
+    print(f"WebSocket: {websocket_scheme}://0.0.0.0:9005/ws")
     print("=" * 60)
     ensure_local_cache_db()
     _prime_local_cache_from_runtime_state()
 
     # Start background task for agent updates
     task = asyncio.create_task(broadcast_agent_updates())
-    global direct_video_demo_task
-    await video_gateway.start()
-    await _start_direct_video_demo_if_needed()
-
     # Start MOQ video subscriber
     moq_task = None
     if MOQ_AVAILABLE:
@@ -3547,9 +3337,6 @@ async def lifespan(app: FastAPI):
         await task
     except asyncio.CancelledError:
         pass
-
-    await _stop_direct_video_demo()
-    await video_gateway.stop()
 
     # Stop MOQ subscriber
     if MOQ_AVAILABLE:
@@ -3647,36 +3434,6 @@ async def update_data_source_config(request: Dict[str, Any]):
     await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
     await manager.broadcast({"type": "TASKS_UPDATED", "payload": payload})
     return {"status": "success", **payload}
-
-
-@app.get("/api/settings/direct-demo-camera")
-async def get_direct_demo_camera_config():
-    """Return direct demo camera settings and runtime status."""
-    return {
-        "status": "success",
-        "config": _get_direct_demo_camera_status(),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/settings/direct-demo-camera")
-async def update_direct_demo_camera_config(request: Dict[str, Any]):
-    """Open or close the direct demo camera."""
-    enabled = bool(request.get("enabled", True))
-    direct_demo_settings.update(_save_direct_demo_settings({"enabled": enabled}))
-
-    if enabled:
-        await _start_direct_video_demo_if_needed()
-    else:
-        await _stop_direct_video_demo()
-
-    config = _get_direct_demo_camera_status()
-    return {
-        "status": "success",
-        "message": "Direct Demo Camera opened." if enabled else "Direct Demo Camera closed.",
-        "config": config,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
 
 
 @app.post("/api/settings/virtual-agents")
@@ -4506,75 +4263,104 @@ async def get_moq_discovered_tracks():
         "tracks": _list_all_video_tracks(),
         "subscribed_tracks": (
             moq_video_subscriber.get_subscribed_tracks() if MOQ_AVAILABLE else []
-        )
-        + [
-            track_id
-            for track_id, track in DIRECT_VIDEO_TRACKS.items()
-            if track.get("watchState") == "subscribed"
-        ],
+        ),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
 
-@app.post("/api/moq/tracks")
-async def create_moq_track(request: Dict[str, Any]):
-    """Manually add a video track to the WebUI track list."""
+def _parse_webui_subscription_payload(request: Dict[str, Any]) -> tuple[List[str], str]:
+    """Parse WebUI namespace + trackName without implicit demo defaults."""
+    raw_namespace = str(request.get("namespace") or "").strip()
+    raw_track_name = str(request.get("trackName") or "").strip()
+
+    namespace_parts = [part.strip() for part in raw_namespace.split("/") if part.strip()]
+    if not namespace_parts:
+        raise HTTPException(status_code=400, detail="namespace is required")
+
+    if not raw_track_name:
+        raise HTTPException(status_code=400, detail="trackName is required")
+
+    return namespace_parts, raw_track_name
+
+
+def _manual_video_track_id(namespace_parts: List[str], track_name: str) -> str:
+    normalized_track_name = track_name.lower()
+    namespace_str = "/".join(namespace_parts)
+    return (
+        "manual_"
+        + re.sub(
+            r"[^a-zA-Z0-9_.-]+",
+            "_",
+            f"{namespace_str}_{normalized_track_name}",
+        ).strip("_")
+    )
+
+
+async def _start_or_switch_moq_subscription(
+    payload: Dict[str, Any],
+    request: Request,
+) -> Dict[str, Any]:
     if not MOQ_AVAILABLE:
         raise HTTPException(status_code=503, detail="MOQ not available")
 
-    agent_id = str(request.get("agentId") or "").strip()
-    task_id = str(request.get("taskId") or "").strip()
-    track_name = str(request.get("trackName") or "").strip()
-    namespace = str(request.get("namespace") or "").strip()
-
-    if not agent_id or not task_id or not track_name:
-        raise HTTPException(
-            status_code=400,
-            detail="agentId, taskId, and trackName are required",
-        )
-
-    namespace_parts = [part for part in namespace.split("/") if part]
-    if not namespace_parts:
-        namespace_parts = [task_id, agent_id]
-
+    namespace_parts, track_name = _parse_webui_subscription_payload(payload)
     namespace_str = "/" + "/".join(namespace_parts)
-    normalized_track_name = track_name.lower()
-    track_id = str(request.get("trackId") or "").strip() or (
-        f"{agent_id}_{task_id}_{normalized_track_name}"
+    track_id = str(payload.get("trackId") or "").strip() or _manual_video_track_id(
+        namespace_parts,
+        track_name,
     )
-    if track_id in DIRECT_VIDEO_TRACKS:
-        raise HTTPException(
-            status_code=400,
-            detail="This track id is reserved by a backend-managed direct demo track",
-        )
 
-    track = moq_video_subscriber.register_discovered_track(
+    moq_video_subscriber.register_discovered_track(
         track_id=track_id,
         namespace=namespace_str,
         track_name=track_name,
-        agent_id=agent_id,
-        task_id=task_id,
+        agent_id=namespace_parts[-1] if namespace_parts else "manual-subscriber",
+        task_id=namespace_parts[0] if namespace_parts else "manual-track",
         source="manual",
     )
+
+    success = await moq_video_subscriber.subscribe_to_track(
+        track_id=track_id,
+        namespace=namespace_parts,
+        track_name=track_name,
+    )
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to subscribe to MOQ track")
+
+    await moq_video_subscriber.switch_preview_track(track_id)
+
+    host = request.url.hostname or "127.0.0.1"
+    player = moq_video_subscriber.get_player_config(track_id, host=host)
+    player["mjpegUrl"] = f"/api/video/stream/{quote(track_id, safe='')}/mjpeg"
+    updated_track = moq_video_subscriber.get_discovered_track(track_id)
 
     await _broadcast_video_tracks()
 
     return {
+        "ok": True,
         "status": "success",
-        "track": track,
+        "track": updated_track,
+        "tracks": _list_all_video_tracks(),
+        "subscribed_tracks": moq_video_subscriber.get_subscribed_tracks(),
+        "player": player,
+        "bootstrap": moq_video_subscriber.get_preview_bridge_snapshot(),
+        "subscription_debug": moq_video_subscriber.get_track_debug_info(),
         "timestamp": datetime.utcnow().isoformat(),
     }
 
 
+@app.post("/api/subscriber/start")
+async def start_or_switch_webui_subscription(
+    request: Request,
+    payload: Dict[str, Any] | None = None,
+):
+    """Start/switch a browser preview subscription, matching examples/webui/server.py."""
+    return await _start_or_switch_moq_subscription(payload or {}, request)
+
+
 @app.delete("/api/moq/tracks/{track_id}")
 async def delete_moq_track(track_id: str):
-    """Remove a non-direct track from the WebUI track list."""
-    if track_id in DIRECT_VIDEO_TRACKS:
-        raise HTTPException(
-            status_code=400,
-            detail="Direct demo tracks are managed by the backend and cannot be deleted here",
-        )
-
+    """Remove a track from the WebUI track list."""
     if not MOQ_AVAILABLE:
         raise HTTPException(status_code=503, detail="MOQ not available")
 
@@ -4594,63 +4380,6 @@ async def delete_moq_track(track_id: str):
 @app.get("/api/video/stream/{track_id}/mjpeg")
 async def stream_moq_video_as_mjpeg(track_id: str, request: Request):
     """Serve a watched track as MJPEG over HTTP."""
-    if track_id in DIRECT_VIDEO_TRACKS:
-        async def generate_direct():
-            queue = asyncio.Queue(maxsize=5)
-
-            def on_frame(frame):
-                try:
-                    if queue.full():
-                        queue.get_nowait()
-                    queue.put_nowait(frame)
-                except Exception:
-                    pass
-
-            video_gateway.subscribe(track_id, on_frame)
-            try:
-                frame = await video_gateway.get_frame_async(track_id)
-                if frame and frame.data:
-                    yield (
-                        b"--frame\r\n"
-                        b"Content-Type: image/jpeg\r\n"
-                        b"Content-Length: "
-                        + str(len(frame.data)).encode("ascii")
-                        + b"\r\n\r\n"
-                        + frame.data
-                        + b"\r\n"
-                    )
-
-                while True:
-                    if await request.is_disconnected():
-                        break
-                    try:
-                        frame = await asyncio.wait_for(queue.get(), timeout=10.0)
-                    except asyncio.TimeoutError:
-                        yield b": keepalive\n\n"
-                        continue
-                    if frame and frame.data:
-                        yield (
-                            b"--frame\r\n"
-                            b"Content-Type: image/jpeg\r\n"
-                            b"Content-Length: "
-                            + str(len(frame.data)).encode("ascii")
-                            + b"\r\n\r\n"
-                            + frame.data
-                            + b"\r\n"
-                        )
-            finally:
-                video_gateway.unsubscribe(track_id, on_frame)
-
-        return StreamingResponse(
-            generate_direct(),
-            media_type="multipart/x-mixed-replace; boundary=frame",
-            headers={
-                "Cache-Control": "no-cache, no-store, must-revalidate",
-                "Pragma": "no-cache",
-                "Expires": "0",
-            },
-        )
-
     if not MOQ_AVAILABLE:
         raise HTTPException(status_code=503, detail="MOQ not available")
 
@@ -4705,16 +4434,6 @@ async def stream_moq_video_as_mjpeg(track_id: str, request: Request):
 @app.get("/api/video/stream/{track_id}/latest")
 async def get_latest_moq_video_frame(track_id: str):
     """Return the latest MJPEG frame snapshot for a watched track."""
-    if track_id in DIRECT_VIDEO_TRACKS:
-        frame = await video_gateway.get_frame_async(track_id)
-        if not frame or not frame.data:
-            raise HTTPException(status_code=404, detail="No frame available")
-        return Response(
-            content=frame.data,
-            media_type="image/jpeg",
-            headers={"Cache-Control": "no-cache"},
-        )
-
     if not MOQ_AVAILABLE:
         raise HTTPException(status_code=503, detail="MOQ not available")
 
@@ -4732,25 +4451,6 @@ async def get_latest_moq_video_frame(track_id: str):
 @app.get("/api/video/stream/{track_id}/info")
 async def get_moq_video_stream_info(track_id: str):
     """Get the current MJPEG playback state for a watched track."""
-    if track_id in DIRECT_VIDEO_TRACKS:
-        frame = video_gateway.get_latest_frame(track_id)
-        track = DIRECT_VIDEO_TRACKS.get(track_id) or {}
-        frame_metadata = frame.metadata if frame and isinstance(frame.metadata, dict) else None
-        return {
-            "track_id": track_id,
-            "status": "active" if frame else "inactive",
-            "watch_state": track.get("watchState", "available"),
-            "has_metadata": bool(track.get("metadata")),
-            "has_init_segment": False,
-            "fragment_count": 0,
-            "has_frame": bool(frame and frame.data),
-            "jpeg_sequence": int(frame_metadata.get("frame_index", 0)) if frame_metadata else 0,
-            "width": getattr(frame, "width", None),
-            "height": getattr(frame, "height", None),
-            "metadata": frame_metadata or track.get("metadata"),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
     if not MOQ_AVAILABLE:
         return {
             "track_id": track_id,
@@ -4762,191 +4462,6 @@ async def get_moq_video_stream_info(track_id: str):
     info = moq_video_subscriber.get_mjpeg_track_status(track_id)
     return {
         **info,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/moq/subscribe")
-async def subscribe_moq_track(request: Dict[str, Any]):
-    """Subscribe to a MOQ video track"""
-    if not MOQ_AVAILABLE:
-        return {"status": "error", "message": "MOQ not available"}
-
-    track_id = request.get("track_id")
-    namespace = request.get("namespace", [])  # e.g., ["acn", "agent", "001"]
-    track_name = request.get("track_name")  # e.g., "camera" or "thermal"
-
-    if not track_id or not track_name:
-        return {"status": "error", "message": "Missing track_id or track_name"}
-
-    success = await moq_video_subscriber.subscribe_to_track(
-        track_id=track_id, namespace=namespace, track_name=track_name
-    )
-
-    if success:
-        return {
-            "status": "success",
-            "track_id": track_id,
-            "namespace": namespace,
-            "track_name": track_name,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    return {"status": "error", "message": "Failed to subscribe"}
-
-
-@app.post("/api/moq/watch/{track_id}")
-async def watch_moq_track(track_id: str, request: Request):
-    """Subscribe to a discovered video track and return browser playback config."""
-    if track_id in DIRECT_VIDEO_TRACKS:
-        DIRECT_VIDEO_TRACKS[track_id]["watchState"] = "subscribed"
-        DIRECT_VIDEO_TRACKS[track_id]["lastSeen"] = datetime.utcnow().isoformat()
-        await _broadcast_video_tracks()
-        return {
-            "status": "success",
-            "track": DIRECT_VIDEO_TRACKS[track_id],
-            "player": {
-                "trackId": track_id,
-                "host": request.url.hostname or "127.0.0.1",
-                "port": 9005,
-                "path": "",
-                "certHash": "",
-                "mjpegUrl": f"/api/video/stream/{quote(track_id, safe='')}/mjpeg",
-            },
-            "bootstrap": {
-                "metadata": DIRECT_VIDEO_TRACKS[track_id].get("metadata"),
-                "initSegmentBase64": None,
-                "recentFragmentsBase64": [],
-            },
-            "subscription_debug": [],
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    if not MOQ_AVAILABLE:
-        return {"status": "error", "message": "MOQ not available"}
-
-    track = moq_video_subscriber.get_discovered_track(track_id)
-    if not track:
-        raise HTTPException(status_code=404, detail="Track not found")
-
-    namespace = [part for part in str(track.get("namespace") or "").split("/") if part]
-    track_name = str(track.get("trackName") or "")
-
-    success = await moq_video_subscriber.subscribe_to_track(
-        track_id=track_id,
-        namespace=namespace,
-        track_name=track_name,
-    )
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to subscribe to MOQ track")
-
-    host = request.url.hostname or "127.0.0.1"
-    player = moq_video_subscriber.get_player_config(track_id, host=host)
-    player["mjpegUrl"] = f"/api/video/stream/{quote(track_id, safe='')}/mjpeg"
-    updated_track = moq_video_subscriber.get_discovered_track(track_id)
-
-    await manager.broadcast(
-        {
-            "type": "VIDEO_TRACKS_AVAILABLE",
-            "payload": {
-                "tracks": _list_all_video_tracks(),
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-        }
-    )
-
-    return {
-        "status": "success",
-        "track": updated_track,
-        "player": player,
-        "bootstrap": moq_video_subscriber.get_bridge_snapshot(track_id),
-        "subscription_debug": moq_video_subscriber.get_track_debug_info(),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/moq/unsubscribe/{track_id}")
-async def unsubscribe_moq_track(track_id: str):
-    """Unsubscribe from a MOQ video track"""
-    if not MOQ_AVAILABLE:
-        return {"status": "error", "message": "MOQ not available"}
-
-    await moq_video_subscriber.unsubscribe_from_track(track_id)
-
-    await manager.broadcast(
-        {
-            "type": "VIDEO_TRACKS_AVAILABLE",
-            "payload": {
-                "tracks": _list_all_video_tracks(),
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-        }
-    )
-
-    return {
-        "status": "success",
-        "track_id": track_id,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.get("/api/moq/tracks/{track_id}/frames")
-async def get_moq_track_frames(track_id: str, limit: int = 10):
-    """Get recent frames for a track (for testing/debugging)"""
-    if not MOQ_AVAILABLE:
-        return {"status": "error", "message": "MOQ not available"}
-
-    frames = moq_video_subscriber.get_frame_buffer(track_id)
-    recent_frames = frames[-limit:] if frames else []
-
-    return {
-        "track_id": track_id,
-        "frame_count": len(frames),
-        "frames": [
-            {
-                "group_id": f.group_id,
-                "object_id": f.object_id,
-                "timestamp": f.timestamp.isoformat(),
-                "frame_type": f.frame_type,
-                "payload_size": len(f.payload),
-            }
-            for f in recent_frames
-        ],
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/moq/auto-subscribe/{agent_id}")
-async def auto_subscribe_agent(agent_id: str):
-    """
-    Auto-subscribe to common video tracks for an agent.
-    NOTE: This endpoint is deprecated. Please use /api/acn/v3/subscribe_track
-    with proper namespace information from ACF.
-    """
-    if not MOQ_AVAILABLE:
-        return {"status": "error", "message": "MOQ not available"}
-
-    # DEPRECATED: Hardcoded namespace format no longer matches Publisher's namespace format
-    # Publisher uses: /{task_id}/{agent_id} (e.g., /task-fa4af/did:udid:...)
-    # This endpoint no longer performs automatic subscription to avoid namespace mismatch.
-    #
-    # To subscribe to video tracks, ACF should call:
-    # POST /api/acn/v3/subscribe_track
-    # with body containing:
-    # {
-    #     "payload": {
-    #         "dst_agent_id": "...",
-    #         "task_id": "task-xxx",
-    #         "track_list": [
-    #             {"namespace": "/task-xxx/did:...", "track": "Video"}
-    #         ]
-    #     }
-    # }
-
-    return {
-        "status": "warning",
-        "agent_id": agent_id,
-        "message": "Auto-subscribe with hardcoded namespace is deprecated. Use /api/acn/v3/subscribe_track with proper namespace from ACF.",
         "timestamp": datetime.utcnow().isoformat(),
     }
 
@@ -5680,9 +5195,13 @@ try:
             response.headers["Expires"] = "0"
             return response
 
+    FRONTEND_BUILD_DIR = ROOT_DIR / "frontend" / "build"
+    FRONTEND_STATIC_DIR = FRONTEND_BUILD_DIR / "static"
+    FRONTEND_INDEX_FILE = FRONTEND_BUILD_DIR / "index.html"
+
     app.mount(
         "/static",
-        NoCacheStaticFiles(directory="/root/lpx/webui/frontend/build/static"),
+        NoCacheStaticFiles(directory=str(FRONTEND_STATIC_DIR)),
         name="static",
     )
 
@@ -5690,7 +5209,7 @@ try:
     async def serve_react():
         """Serve React frontend with no-cache headers"""
         response = FileResponse(
-            "/root/lpx/webui/frontend/build/index.html",
+            str(FRONTEND_INDEX_FILE),
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
                 "Pragma": "no-cache",
@@ -5703,7 +5222,7 @@ try:
     async def serve_react_routes(path: str):
         """Serve React frontend for all routes with no-cache headers"""
         response = FileResponse(
-            "/root/lpx/webui/frontend/build/index.html",
+            str(FRONTEND_INDEX_FILE),
             headers={
                 "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
                 "Pragma": "no-cache",

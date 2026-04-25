@@ -22,10 +22,14 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 BACKEND_PORT="${BACKEND_PORT:-9005}"
+WEBUI_SCHEME="${WEBUI_SCHEME:-https}"
+export WEBUI_SCHEME
 LOG_DIR="$ROOT_DIR/logs"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_BUILD_LOG="$LOG_DIR/frontend_build.log"
 PID_FILE="$LOG_DIR/webui.pid"
+HTTPS_CERT_FILE="${WEBUI_HTTPS_CERT_FILE:-$LOG_DIR/webui_https_cert.pem}"
+HTTPS_KEY_FILE="${WEBUI_HTTPS_KEY_FILE:-$LOG_DIR/webui_https_key.pem}"
 
 # 创建日志目录
 mkdir -p "$LOG_DIR"
@@ -86,6 +90,72 @@ PY
     "$python_bin" -m pip install -r "$BACKEND_DIR/requirements.txt"
 }
 
+ensure_https_cert() {
+    local python_bin="$1"
+
+    if [ "$WEBUI_SCHEME" != "https" ]; then
+        return 0
+    fi
+
+    if [ -s "$HTTPS_CERT_FILE" ] && [ -s "$HTTPS_KEY_FILE" ]; then
+        return 0
+    fi
+
+    echo_color "${YELLOW}  生成 HTTPS 自签名证书...${NC}"
+    "$python_bin" - "$HTTPS_CERT_FILE" "$HTTPS_KEY_FILE" <<'PY'
+import ipaddress
+import socket
+import sys
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+cert_path = Path(sys.argv[1])
+key_path = Path(sys.argv[2])
+cert_path.parent.mkdir(parents=True, exist_ok=True)
+
+hosts = {"localhost", "127.0.0.1", socket.gethostname(), socket.getfqdn()}
+try:
+    hosts.update(socket.gethostbyname_ex(socket.gethostname())[2])
+except OSError:
+    pass
+
+key = ec.generate_private_key(ec.SECP256R1())
+subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "ACN WebUI")])
+san_values = []
+for host in sorted(item for item in hosts if item):
+    try:
+        san_values.append(x509.IPAddress(ipaddress.ip_address(host)))
+    except ValueError:
+        san_values.append(x509.DNSName(host))
+
+cert = (
+    x509.CertificateBuilder()
+    .subject_name(subject)
+    .issuer_name(issuer)
+    .public_key(key.public_key())
+    .serial_number(x509.random_serial_number())
+    .not_valid_before(datetime.utcnow() - timedelta(minutes=1))
+    .not_valid_after(datetime.utcnow() + timedelta(days=30))
+    .add_extension(x509.SubjectAlternativeName(san_values), critical=False)
+    .sign(key, hashes.SHA256())
+)
+
+cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+key_path.write_bytes(
+    key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+)
+PY
+}
+
 is_port_open() {
     python3 - "$BACKEND_PORT" <<'PY' >/dev/null 2>&1
 import socket
@@ -111,23 +181,34 @@ start_backend() {
     # 使用 venv 的 python 直接启动，不依赖 source activate。
     VENV_PYTHON="$(find_backend_python)"
     ensure_backend_deps "$VENV_PYTHON"
+    ensure_https_cert "$VENV_PYTHON"
+
+    local uvicorn_args=(
+        -m uvicorn app.main:app
+        --host 0.0.0.0
+        --port "$BACKEND_PORT"
+        --log-level info
+    )
+    if [ "$WEBUI_SCHEME" = "https" ]; then
+        uvicorn_args+=(--ssl-certfile "$HTTPS_CERT_FILE" --ssl-keyfile "$HTTPS_KEY_FILE")
+    fi
     
     # 启动后端（使用 setsid 确保脱离终端）
-    setsid "$VENV_PYTHON" -m uvicorn app.main:app \
-        --host 0.0.0.0 \
-        --port "$BACKEND_PORT" \
-        --log-level info \
-        > "$BACKEND_LOG" 2>&1 &
+    setsid "$VENV_PYTHON" "${uvicorn_args[@]}" > "$BACKEND_LOG" 2>&1 &
     
     BACKEND_PID=$!
     
     # 等待服务启动
     for i in {1..10}; do
         sleep 1
-        if curl -fsS "http://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+        if curl -kfsS "$WEBUI_SCHEME://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
             echo_color "${GREEN}  ✓ 后端服务已启动 (PID: $BACKEND_PID)${NC}"
-            echo_color "${GREEN}  ✓ API: http://localhost:$BACKEND_PORT${NC}"
-            echo_color "${GREEN}  ✓ WebSocket: ws://localhost:$BACKEND_PORT/ws${NC}"
+            echo_color "${GREEN}  ✓ API: $WEBUI_SCHEME://localhost:$BACKEND_PORT${NC}"
+            if [ "$WEBUI_SCHEME" = "https" ]; then
+                echo_color "${GREEN}  ✓ WebSocket: wss://localhost:$BACKEND_PORT/ws${NC}"
+            else
+                echo_color "${GREEN}  ✓ WebSocket: ws://localhost:$BACKEND_PORT/ws${NC}"
+            fi
             echo $BACKEND_PID >> "$PID_FILE"
             return 0
         fi
@@ -168,7 +249,7 @@ check_status() {
     # 检查后端
     if pgrep -f "uvicorn.*app.main:app.*$BACKEND_PORT" > /dev/null; then
         echo_color "${GREEN}  ✓ 后端服务: 运行中${NC}"
-        if curl -fsS "http://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
+        if curl -kfsS "$WEBUI_SCHEME://localhost:$BACKEND_PORT/api/health" > /dev/null 2>&1; then
             echo_color "${GREEN}    - API 正常${NC}"
         else
             echo_color "${RED}    - API 无响应${NC}"
@@ -251,8 +332,8 @@ case "${1:-start}" in
             echo "========================================"
             echo ""
             echo "访问地址:"
-            echo "  http://<服务器IP>:$BACKEND_PORT"
-            echo "  http://localhost:$BACKEND_PORT"
+            echo "  $WEBUI_SCHEME://<服务器IP>:$BACKEND_PORT"
+            echo "  $WEBUI_SCHEME://localhost:$BACKEND_PORT"
             echo ""
             echo "查看日志:"
             echo "  tail -f $BACKEND_LOG"

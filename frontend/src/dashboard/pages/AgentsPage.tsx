@@ -17,10 +17,9 @@ interface AgentsPageProps {
   videoTracksLoading: boolean;
   videoTracksError: string | null;
   language: LanguageMode;
-  onCreateTrack: (draft: VideoTrackDraft) => Promise<void>;
   onDeleteTrack: (trackId: string) => Promise<void>;
-  onWatchTrack: (
-    trackId: string
+  onSubscribeTrack: (
+    draft: VideoTrackDraft
   ) => Promise<{ player: VideoPlayerConfig; bootstrap?: VideoPlayerBootstrap; track?: VideoTrackModel }>;
 }
 
@@ -36,25 +35,20 @@ export const AgentsPage = ({
   videoTracksLoading,
   videoTracksError,
   language,
-  onCreateTrack,
   onDeleteTrack,
-  onWatchTrack
+  onSubscribeTrack
 }: AgentsPageProps) => {
   const [selectedAgentId, setSelectedAgentId] = useState<string>('');
-  const [videoDialogOpen, setVideoDialogOpen] = useState(false);
   const [watchingTrackId, setWatchingTrackId] = useState<string | null>(null);
   const [activePlayerConfig, setActivePlayerConfig] = useState<VideoPlayerConfig | null>(null);
   const [activePlayerBootstrap, setActivePlayerBootstrap] = useState<VideoPlayerBootstrap | null>(null);
-  const [activeVideoTrackId, setActiveVideoTrackId] = useState<string | null>(null);
+  const [activeVideoTrack, setActiveVideoTrack] = useState<VideoTrackModel | null>(null);
   const [watchVideoError, setWatchVideoError] = useState<string | null>(null);
   const [trackDraft, setTrackDraft] = useState<VideoTrackDraft>({
-    agentId: '',
-    taskId: '',
-    trackName: 'Video',
-    namespace: ''
+    namespace: '',
+    trackName: ''
   });
-  const [trackActionMessage, setTrackActionMessage] = useState<string | null>(null);
-  const [trackActionError, setTrackActionError] = useState<string | null>(null);
+  const [subscribedTrackOrder, setSubscribedTrackOrder] = useState<string[]>([]);
   const [creatingTrack, setCreatingTrack] = useState(false);
   const [deletingTrackId, setDeletingTrackId] = useState<string | null>(null);
   const isZh = language === 'zh';
@@ -78,7 +72,6 @@ export const AgentsPage = ({
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setSelectedAgentId('');
-        setVideoDialogOpen(false);
       }
     };
 
@@ -88,24 +81,58 @@ export const AgentsPage = ({
 
   const selectedAgent =
     agents.find((agent) => agent.id === selectedAgentId) ?? null;
-  const activeVideoTrack =
-    videoTracks.find((track) => track.trackId === activeVideoTrackId) ?? null;
+  const activeRenderedTrack =
+    videoTracks.find((track) => track.trackId === activeVideoTrack?.trackId) ?? activeVideoTrack;
+  const subscribedTrackLookup = new Map(
+    videoTracks
+      .filter((track) => track.watchState === 'subscribed')
+      .map((track) => [track.trackId, track])
+  );
+  const orderedSubscribedTracks = subscribedTrackOrder
+    .map((trackId) => subscribedTrackLookup.get(trackId))
+    .filter((track): track is VideoTrackModel => Boolean(track));
+  const orderedSubscribedTrackIds = new Set(orderedSubscribedTracks.map((track) => track.trackId));
+  const subscribedTracks = [
+    ...orderedSubscribedTracks,
+    ...videoTracks.filter(
+      (track) => track.watchState === 'subscribed' && !orderedSubscribedTrackIds.has(track.trackId)
+    )
+  ];
 
-  const handleWatchTrack = async (trackId: string) => {
+  useEffect(() => {
+    setSubscribedTrackOrder((current) => {
+      const nextSubscribedTrackIds = new Set(
+        videoTracks
+          .filter((track) => track.watchState === 'subscribed')
+          .map((track) => track.trackId)
+      );
+      const next = current.filter((trackId) => nextSubscribedTrackIds.has(trackId));
+      for (const track of videoTracks) {
+        if (track.watchState === 'subscribed' && !next.includes(track.trackId)) {
+          next.push(track.trackId);
+        }
+      }
+
+      if (next.length === current.length && next.every((trackId, index) => trackId === current[index])) {
+        return current;
+      }
+      return next;
+    });
+  }, [videoTracks]);
+
+  const handleSwitchTrack = async (track: VideoTrackModel) => {
+    const trackId = track.trackId;
     setWatchingTrackId(trackId);
     setWatchVideoError(null);
-    setVideoDialogOpen(true);
-    setActiveVideoTrackId(trackId);
-    setActivePlayerConfig(null);
-    setActivePlayerBootstrap(null);
 
     try {
-      const payload = await onWatchTrack(trackId);
+      const payload = await onSubscribeTrack({
+        namespace: track.namespace.replace(/^\/+/, ''),
+        trackName: track.trackName
+      });
       setActivePlayerConfig(payload.player);
       setActivePlayerBootstrap(payload.bootstrap ?? null);
-      if (payload.track?.trackId) {
-        setActiveVideoTrackId(payload.track.trackId);
-      }
+      setActiveVideoTrack(payload.track ?? track);
     } catch (error) {
       setWatchVideoError(error instanceof Error ? error.message : videoCopy.error);
     } finally {
@@ -115,44 +142,47 @@ export const AgentsPage = ({
 
   const handleCreateTrack = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    const namespace = trackDraft.namespace.trim();
+    const trackName = trackDraft.trackName.trim();
+    const namespaceParts = namespace.split('/').map((part) => part.trim()).filter(Boolean);
+    if (namespaceParts.length === 0 || !trackName) {
+      setWatchVideoError(videoCopy.requiredFields);
+      return;
+    }
+
     setCreatingTrack(true);
-    setTrackActionMessage(null);
-    setTrackActionError(null);
+    setWatchVideoError(null);
 
     try {
-      await onCreateTrack(trackDraft);
+      const payload = await onSubscribeTrack({ namespace, trackName });
+      setActivePlayerConfig(payload.player);
+      setActivePlayerBootstrap(payload.bootstrap ?? null);
+      setActiveVideoTrack(payload.track ?? null);
       setTrackDraft({
-        agentId: '',
-        taskId: '',
-        trackName: 'Video',
-        namespace: ''
+        namespace,
+        trackName
       });
-      setTrackActionMessage(videoCopy.addSuccess);
     } catch (error) {
-      setTrackActionError(error instanceof Error ? error.message : videoCopy.actionFailed);
+      setWatchVideoError(error instanceof Error ? error.message : videoCopy.actionFailed);
     } finally {
       setCreatingTrack(false);
     }
   };
 
-  const handleDeleteTrack = async (track: VideoTrackModel) => {
-    if (track.source === 'direct') {
-      return;
-    }
-
+  const handleRemoveTrack = async (track: VideoTrackModel) => {
     setDeletingTrackId(track.trackId);
-    setTrackActionMessage(null);
-    setTrackActionError(null);
+    setWatchVideoError(null);
 
     try {
       await onDeleteTrack(track.trackId);
-      setTrackActionMessage(videoCopy.deleteSuccess);
-      if (activeVideoTrackId === track.trackId) {
-        setVideoDialogOpen(false);
-        setActiveVideoTrackId(null);
+      if (activeVideoTrack?.trackId === track.trackId) {
+        setActiveVideoTrack(null);
+        setActivePlayerConfig(null);
+        setActivePlayerBootstrap(null);
+        setWatchVideoError(null);
       }
     } catch (error) {
-      setTrackActionError(error instanceof Error ? error.message : videoCopy.actionFailed);
+      setWatchVideoError(error instanceof Error ? error.message : videoCopy.actionFailed);
     } finally {
       setDeletingTrackId(null);
     }
@@ -284,85 +314,6 @@ export const AgentsPage = ({
         )
       : null;
 
-  const videoDialog =
-    videoDialogOpen && activeVideoTrack && typeof document !== 'undefined'
-      ? createPortal(
-          <div
-            className="fixed inset-0 z-[265] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm"
-            role="presentation"
-            onClick={() => setVideoDialogOpen(false)}
-          >
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-label={`${activeVideoTrack.trackName} video player`}
-              className="glass-panel max-h-[88vh] w-full max-w-6xl overflow-y-auto p-6 md:p-7"
-              onClick={(event) => event.stopPropagation()}
-            >
-              <div className="mb-5 flex items-center justify-between gap-4">
-                <div>
-                  <p className="panel-eyebrow">{videoCopy.modalEyebrow}</p>
-                  <h3 className="theme-title mt-2 text-2xl font-semibold">
-                    {activeVideoTrack.trackName}
-                  </h3>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setVideoDialogOpen(false)}
-                  className="theme-top-button px-4 py-2"
-                >
-                  {videoCopy.close}
-                </button>
-              </div>
-
-              {watchVideoError ? (
-                <div className="theme-subtle-card theme-copy rounded-3xl px-5 py-5 text-sm">
-                  {watchVideoError}
-                </div>
-              ) : activePlayerConfig ? (
-                <MOQTrackPlayer
-                  language={language}
-                  bootstrap={activePlayerBootstrap}
-                  player={activePlayerConfig}
-                  track={activeVideoTrack}
-                />
-              ) : (
-                <div className="theme-subtle-card theme-copy rounded-3xl px-5 py-10 text-center text-sm">
-                  {videoCopy.watching}
-                </div>
-              )}
-            </div>
-          </div>,
-          document.body
-        )
-      : null;
-
-  const watchStateLabel = (state: VideoTrackModel['watchState']) => {
-    switch (state) {
-      case 'requested':
-        return videoCopy.requested;
-      case 'pending':
-        return videoCopy.pending;
-      case 'subscribed':
-        return videoCopy.subscribed;
-      case 'error':
-        return videoCopy.error;
-      default:
-        return videoCopy.ready;
-    }
-  };
-
-  const trackSourceLabel = (source?: VideoTrackModel['source']) => {
-    switch (source) {
-      case 'direct':
-        return videoCopy.sourceDirect;
-      case 'manual':
-        return videoCopy.sourceManual;
-      default:
-        return videoCopy.sourceMoq;
-    }
-  };
-
   return (
     <div className="space-y-6">
       <SectionCard
@@ -428,36 +379,24 @@ export const AgentsPage = ({
         title={videoCopy.title}
         description={videoCopy.description}
       >
-        <form onSubmit={handleCreateTrack} className="theme-card-muted mb-4 p-5">
+        <form onSubmit={handleCreateTrack} className="theme-card-muted mb-4 p-5" noValidate>
           <div className="mb-4">
             <p className="panel-eyebrow">{videoCopy.manageTitle}</p>
             <p className="theme-copy mt-2 text-sm leading-6">{videoCopy.manageDescription}</p>
           </div>
 
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(220px,0.55fr)]">
             <label className="block">
               <span className="theme-muted mb-2 block text-xs uppercase tracking-[0.18em]">
-                {videoCopy.agentIdLabel}
+                {videoCopy.namespaceLabel}
               </span>
               <input
-                value={trackDraft.agentId}
+                value={trackDraft.namespace}
                 onChange={(event) =>
-                  setTrackDraft((current) => ({ ...current, agentId: event.target.value }))
+                  setTrackDraft((current) => ({ ...current, namespace: event.target.value }))
                 }
                 className={inputClassName}
-                required
-              />
-            </label>
-            <label className="block">
-              <span className="theme-muted mb-2 block text-xs uppercase tracking-[0.18em]">
-                {videoCopy.taskIdLabel}
-              </span>
-              <input
-                value={trackDraft.taskId}
-                onChange={(event) =>
-                  setTrackDraft((current) => ({ ...current, taskId: event.target.value }))
-                }
-                className={inputClassName}
+                placeholder={videoCopy.namespacePlaceholder}
                 required
               />
             </label>
@@ -474,112 +413,92 @@ export const AgentsPage = ({
                 required
               />
             </label>
-            <label className="block">
-              <span className="theme-muted mb-2 block text-xs uppercase tracking-[0.18em]">
-                {videoCopy.namespaceLabel}
-              </span>
-              <input
-                value={trackDraft.namespace ?? ''}
-                onChange={(event) =>
-                  setTrackDraft((current) => ({ ...current, namespace: event.target.value }))
-                }
-                className={inputClassName}
-                placeholder={videoCopy.namespacePlaceholder}
-              />
-            </label>
           </div>
 
-          <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="theme-copy text-sm">
-              {trackActionError ? trackActionError : trackActionMessage}
-            </div>
+          <div className="mt-4 flex justify-end">
             <button
               type="submit"
               className={['theme-top-button px-4 py-2', creatingTrack ? 'cursor-wait opacity-70' : ''].join(' ')}
               disabled={creatingTrack}
             >
-              {creatingTrack ? videoCopy.adding : videoCopy.add}
+              {creatingTrack ? videoCopy.subscribing : videoCopy.subscribe}
             </button>
           </div>
         </form>
 
-        {videoTracksLoading ? (
-          <div className="theme-card-muted px-5 py-8 text-sm">{videoCopy.loading}</div>
-        ) : videoTracksError ? (
-          <div className="theme-card-muted px-5 py-8 text-sm">{videoTracksError}</div>
-        ) : videoTracks.length === 0 ? (
-          <div className="theme-card-muted px-5 py-8 text-sm">{videoCopy.empty}</div>
-        ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {videoTracks.map((track) => (
-              <article key={track.trackId} className="theme-card-muted overflow-hidden p-5">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <h3 className="theme-title text-lg font-semibold">{track.trackName}</h3>
-                    <p className="theme-soft mt-1 text-sm">
-                      {track.agentId} · {videoCopy.task} {track.taskId}
-                    </p>
-                  </div>
-                  <span className="theme-chip px-3 py-1 text-xs font-medium uppercase tracking-[0.16em]">
-                    {watchStateLabel(track.watchState)}
-                  </span>
-                </div>
+        <div className="theme-card-muted mb-4 p-5">
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <p className="panel-eyebrow">{videoCopy.subscribedTracks}</p>
+              <p className="theme-copy mt-2 text-sm leading-6">{videoCopy.subscribedDescription}</p>
+            </div>
+            {videoTracksLoading ? (
+              <span className="theme-chip px-3 py-1 text-xs font-medium uppercase tracking-[0.16em]">
+                {videoCopy.loading}
+              </span>
+            ) : null}
+          </div>
 
-                <div className="mt-4 grid gap-3 sm:grid-cols-2">
-                  <div className="theme-subtle-card p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{videoCopy.namespace}</p>
-                    <p className="theme-title mt-2 break-all text-sm font-medium">{track.namespace}</p>
-                  </div>
-                  <div className="theme-subtle-card p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{videoCopy.seen}</p>
-                    <p className="theme-title mt-2 text-sm font-medium">{track.seenCount}</p>
-                  </div>
-                  <div className="theme-subtle-card p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{videoCopy.source}</p>
-                    <p className="theme-title mt-2 text-sm font-medium">{trackSourceLabel(track.source)}</p>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center justify-between gap-4">
-                  <p className="theme-soft text-sm">
-                    {videoCopy.lastSeen}: {new Date(track.lastSeen).toLocaleString(language === 'zh' ? 'zh-CN' : 'en-US')}
-                  </p>
-                  <div className="flex flex-wrap items-center gap-3">
+          {videoTracksError ? (
+            <div className="theme-subtle-card theme-copy px-4 py-3 text-sm">{videoTracksError}</div>
+          ) : subscribedTracks.length === 0 ? (
+            <div className="theme-subtle-card theme-copy px-4 py-3 text-sm">{videoCopy.emptySubscribed}</div>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {subscribedTracks.map((track) => {
+                const active = activeRenderedTrack?.trackId === track.trackId;
+                return (
+                  <div
+                    key={track.trackId}
+                    className={[
+                      'inline-flex max-w-full items-center gap-1 rounded-full border px-1.5 py-1',
+                      active
+                        ? 'border-cyan-300/45 bg-cyan-300/10'
+                        : 'border-[color:var(--border-soft)] bg-[color:var(--surface-strong)]'
+                    ].join(' ')}
+                  >
                     <button
                       type="button"
-                      onClick={() => void handleWatchTrack(track.trackId)}
-                      className={['theme-top-button px-4 py-2', watchingTrackId === track.trackId ? 'cursor-wait opacity-70' : ''].join(' ')}
+                      onClick={() => void handleSwitchTrack(track)}
+                      className="theme-title max-w-[320px] truncate rounded-full px-3 py-1.5 text-sm font-medium"
                       disabled={watchingTrackId === track.trackId}
                     >
-                      {watchingTrackId === track.trackId ? videoCopy.watching : videoCopy.watch}
+                      {track.namespace.replace(/^\/+/, '')}/{track.trackName}
                     </button>
                     <button
                       type="button"
-                      onClick={() => void handleDeleteTrack(track)}
-                      className={['theme-top-button px-4 py-2', deletingTrackId === track.trackId ? 'cursor-wait opacity-70' : ''].join(' ')}
-                      disabled={track.source === 'direct' || deletingTrackId === track.trackId}
-                      title={track.source === 'direct' ? videoCopy.deleteBlocked : undefined}
+                      onClick={() => void handleRemoveTrack(track)}
+                      className="theme-soft rounded-full px-2 py-1 text-sm hover:text-[color:var(--text-main)]"
+                      disabled={deletingTrackId === track.trackId}
+                      aria-label={`${videoCopy.removeTrack} ${track.trackName}`}
                     >
-                      {track.source === 'direct'
-                        ? videoCopy.deleteBlocked
-                        : deletingTrackId === track.trackId
-                          ? videoCopy.deleting
-                          : videoCopy.delete}
+                      x
                     </button>
                   </div>
-                </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
 
-                {track.lastError ? (
-                  <p className="theme-copy mt-3 text-sm leading-6">{track.lastError}</p>
-                ) : null}
-              </article>
-            ))}
+        {watchVideoError ? (
+          <div className="theme-card-muted theme-copy px-5 py-5 text-sm">{watchVideoError}</div>
+        ) : activePlayerConfig && activeRenderedTrack ? (
+          <MOQTrackPlayer
+            key={activeRenderedTrack.trackId}
+            language={language}
+            bootstrap={activePlayerBootstrap}
+            player={activePlayerConfig}
+            track={activeRenderedTrack}
+          />
+        ) : (
+          <div className="theme-card-muted theme-copy px-5 py-12 text-center text-sm">
+            {videoCopy.previewPlaceholder}
           </div>
         )}
       </SectionCard>
 
       {detailDialog}
-      {videoDialog}
     </div>
   );
 };

@@ -846,49 +846,11 @@ const App = () => {
     });
   }, [demoConfigStages, demoIncludeTopologyTest, handleRunConfiguredDemo, topologyTestSpeed]);
 
-  const handleWatchVideoTrack = useCallback(
+  const handleSubscribeVideoTrack = useCallback(
     async (
-      trackId: string
+      draft: VideoTrackDraft
     ): Promise<{ player: VideoPlayerConfig; bootstrap?: VideoPlayerBootstrap; track?: VideoTrackModel }> => {
-      const response = await fetch(`/api/moq/watch/${encodeURIComponent(trackId)}`, {
-        method: 'POST'
-      });
-      const payload = (await response.json()) as {
-        player?: VideoPlayerConfig;
-        bootstrap?: VideoPlayerBootstrap;
-        track?: VideoTrackModel;
-        detail?: string;
-        message?: string;
-      };
-
-      if (!response.ok || !payload.player) {
-        throw new Error(
-          payload.detail ||
-            payload.message ||
-            (isZh ? '视频订阅失败。' : 'Failed to subscribe to the selected video track.')
-        );
-      }
-
-      if (payload.track) {
-        setVideoTracks((current) =>
-          current.map((track) => (track.trackId === payload.track?.trackId ? payload.track : track))
-        );
-      } else {
-        void fetchVideoTracks();
-      }
-
-      return {
-        player: payload.player,
-        bootstrap: payload.bootstrap,
-        track: payload.track
-      };
-    },
-    [fetchVideoTracks, isZh]
-  );
-
-  const handleCreateVideoTrack = useCallback(
-    async (draft: VideoTrackDraft): Promise<void> => {
-      const response = await fetch('/api/moq/tracks', {
+      const response = await fetch('/api/subscriber/start', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -900,17 +862,34 @@ const App = () => {
         detail?: string;
         message?: string;
         track?: VideoTrackModel;
+        player?: VideoPlayerConfig;
+        bootstrap?: VideoPlayerBootstrap;
       };
 
-      if (!response.ok || !payload.track) {
+      if (!response.ok || !payload.player) {
         throw new Error(
           payload.detail ||
             payload.message ||
-            (isZh ? '视频轨道添加失败。' : 'Failed to add the video track.')
+            (isZh ? '视频订阅失败。' : 'Failed to subscribe to the selected video track.')
         );
       }
 
-      await fetchVideoTracks();
+      if (payload.track) {
+        setVideoTracks((current) => {
+          const exists = current.some((track) => track.trackId === payload.track?.trackId);
+          if (exists) {
+            return current.map((track) => (track.trackId === payload.track?.trackId ? payload.track : track));
+          }
+          return [payload.track as VideoTrackModel, ...current];
+        });
+      }
+      void fetchVideoTracks();
+
+      return {
+        player: payload.player,
+        bootstrap: payload.bootstrap,
+        track: payload.track
+      };
     },
     [fetchVideoTracks, isZh]
   );
@@ -986,9 +965,8 @@ const App = () => {
             videoTracksLoading={videoTracksLoading}
             videoTracksError={videoTracksError}
             language={language}
-            onCreateTrack={handleCreateVideoTrack}
             onDeleteTrack={handleDeleteVideoTrack}
-            onWatchTrack={handleWatchVideoTrack}
+            onSubscribeTrack={handleSubscribeVideoTrack}
           />
         );
       case 'network':

@@ -2,7 +2,7 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { CertificateUploadModal } from '../components/CertificateUploadModal';
 import { SectionCard } from '../components/SectionCard';
 import { LanguageMode, shellCopy } from '../i18n';
-import { CertificateRecord, DatabaseSourceConfig, DirectDemoCameraConfig } from '../types';
+import { CertificateRecord, DatabaseSourceConfig } from '../types';
 
 interface SettingsPageProps {
   dataSourceConfig: DatabaseSourceConfig | null;
@@ -12,7 +12,6 @@ interface SettingsPageProps {
 export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) => {
   const isZh = language === 'zh';
   const certCopy = shellCopy[language].certificates;
-  const directDemoCopy = shellCopy[language].directDemoCamera;
   const virtualAgentCopy = shellCopy[language].virtualAgent;
   const [certificates, setCertificates] = useState<CertificateRecord[]>([]);
   const [certificatesLoading, setCertificatesLoading] = useState(true);
@@ -23,11 +22,6 @@ export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) 
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [deletingCertId, setDeletingCertId] = useState<string | null>(null);
-  const [directDemoConfig, setDirectDemoConfig] = useState<DirectDemoCameraConfig | null>(null);
-  const [directDemoLoading, setDirectDemoLoading] = useState(true);
-  const [directDemoBusy, setDirectDemoBusy] = useState(false);
-  const [directDemoMessage, setDirectDemoMessage] = useState<string | null>(null);
-  const [directDemoError, setDirectDemoError] = useState<string | null>(null);
   const [virtualAgentDraft, setVirtualAgentDraft] = useState({
     agentName: '',
     agentId: '',
@@ -123,35 +117,6 @@ export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) 
     void fetchCertificates();
   }, [fetchCertificates]);
 
-  const fetchDirectDemoConfig = useCallback(async () => {
-    setDirectDemoLoading(true);
-    try {
-      const response = await fetch('/api/settings/direct-demo-camera');
-      const payload = (await response.json()) as {
-        config?: DirectDemoCameraConfig;
-        detail?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(payload.detail || `HTTP ${response.status}`);
-      }
-
-      setDirectDemoConfig(payload.config ?? null);
-      setDirectDemoError(null);
-      return true;
-    } catch (error) {
-      console.error('Failed to load Direct Demo Camera settings:', error);
-      setDirectDemoError(error instanceof Error ? error.message : directDemoCopy.failed);
-      return false;
-    } finally {
-      setDirectDemoLoading(false);
-    }
-  }, [directDemoCopy.failed]);
-
-  useEffect(() => {
-    void fetchDirectDemoConfig();
-  }, [fetchDirectDemoConfig]);
-
   const handleUploadCertificate = useCallback(
     async ({ file, filePath }: { file: File | null; filePath: string }) => {
       setUploading(true);
@@ -234,44 +199,6 @@ export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) 
       }
     },
     [certCopy.deleteFailed, certCopy.deleteSuccess]
-  );
-
-  const handleDirectDemoToggle = useCallback(
-    async (enabled: boolean) => {
-      setDirectDemoBusy(true);
-      setDirectDemoMessage(null);
-      setDirectDemoError(null);
-
-      try {
-        const response = await fetch('/api/settings/direct-demo-camera', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ enabled })
-        });
-        const payload = (await response.json()) as {
-          config?: DirectDemoCameraConfig;
-          message?: string;
-          detail?: string;
-        };
-
-        if (!response.ok) {
-          throw new Error(payload.detail || `HTTP ${response.status}`);
-        }
-
-        setDirectDemoConfig(payload.config ?? null);
-        setDirectDemoMessage(
-          payload.message || (enabled ? directDemoCopy.openSuccess : directDemoCopy.closeSuccess)
-        );
-      } catch (error) {
-        console.error('Failed to update Direct Demo Camera settings:', error);
-        setDirectDemoError(error instanceof Error ? error.message : directDemoCopy.failed);
-      } finally {
-        setDirectDemoBusy(false);
-      }
-    },
-    [directDemoCopy.closeSuccess, directDemoCopy.failed, directDemoCopy.openSuccess]
   );
 
   const handleVirtualAgentSubmit = useCallback(
@@ -447,98 +374,6 @@ export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) 
               </button>
             </div>
           </form>
-        </div>
-
-        <div className="mt-6 rounded-[28px] border border-[color:var(--border-soft)] bg-[color:var(--surface-soft-solid)] p-5 md:p-6">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <p className="panel-eyebrow">{directDemoCopy.title}</p>
-              <h3 className="theme-title mt-2 text-xl font-semibold">{directDemoCopy.statusTitle}</h3>
-              <p className="theme-soft mt-2 max-w-3xl text-sm leading-6">{directDemoCopy.description}</p>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <button
-                type="button"
-                onClick={() => {
-                  void handleDirectDemoToggle(true);
-                }}
-                disabled={directDemoBusy || directDemoConfig?.enabled}
-                className={[
-                  'theme-top-button px-5 py-3',
-                  directDemoBusy ? 'cursor-wait opacity-70' : '',
-                  directDemoConfig?.enabled ? 'opacity-60' : ''
-                ].join(' ')}
-              >
-                {directDemoBusy && !directDemoConfig?.enabled ? directDemoCopy.opening : directDemoCopy.open}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  void handleDirectDemoToggle(false);
-                }}
-                disabled={directDemoBusy || directDemoConfig?.enabled === false}
-                className={[
-                  'theme-top-button px-5 py-3',
-                  directDemoBusy ? 'cursor-wait opacity-70' : '',
-                  directDemoConfig?.enabled === false ? 'opacity-60' : ''
-                ].join(' ')}
-              >
-                {directDemoBusy && directDemoConfig?.enabled ? directDemoCopy.closing : directDemoCopy.close}
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-5 min-h-[1.5rem] text-sm">
-            {directDemoError ? (
-              <span className="text-[color:var(--accent-rose-text)]">{directDemoError}</span>
-            ) : directDemoMessage ? (
-              <span className="theme-copy">{directDemoMessage}</span>
-            ) : null}
-          </div>
-
-          {directDemoLoading ? (
-            <div className="theme-subtle-card mt-4 px-4 py-5 text-sm">
-              {isZh ? '正在加载直连演示相机状态...' : 'Loading Direct Demo Camera status...'}
-            </div>
-          ) : (
-            <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-              <div className="theme-subtle-card px-4 py-4">
-                <p className="theme-muted text-xs font-semibold uppercase tracking-[0.18em]">
-                  {directDemoCopy.statusTitle}
-                </p>
-                <p className="theme-title mt-2 text-sm font-medium">
-                  {directDemoConfig?.enabled ? directDemoCopy.statusEnabled : directDemoCopy.statusDisabled}
-                </p>
-              </div>
-              <div className="theme-subtle-card px-4 py-4">
-                <p className="theme-muted text-xs font-semibold uppercase tracking-[0.18em]">
-                  Runtime
-                </p>
-                <p className="theme-title mt-2 text-sm font-medium">
-                  {directDemoConfig?.running ? directDemoCopy.runtimeRunning : directDemoCopy.runtimeStopped}
-                </p>
-              </div>
-              <div className="theme-subtle-card px-4 py-4">
-                <p className="theme-muted text-xs font-semibold uppercase tracking-[0.18em]">
-                  Track
-                </p>
-                <p className="theme-title mt-2 text-sm font-medium">
-                  {directDemoConfig?.trackAvailable ? directDemoCopy.trackAvailable : directDemoCopy.trackUnavailable}
-                </p>
-              </div>
-              <div className="theme-subtle-card px-4 py-4">
-                <p className="theme-muted text-xs font-semibold uppercase tracking-[0.18em]">
-                  {directDemoCopy.trackName}
-                </p>
-                <p className="theme-title mt-2 text-sm font-medium">
-                  {directDemoConfig?.trackName || '-'}
-                </p>
-                <p className="theme-copy mt-2 break-all text-xs">
-                  {directDemoCopy.trackId}: {directDemoConfig?.trackId || '-'}
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
         <div className="mt-6 rounded-[28px] border border-[color:var(--border-soft)] bg-[color:var(--surface-soft-solid)] p-5 md:p-6">

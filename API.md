@@ -2,7 +2,7 @@
 
 后端服务运行在 **端口 9005**
 
-Base URL: `http://<host>:9005`
+Base URL: `https://<host>:9005`
 
 ---
 
@@ -163,6 +163,8 @@ Base URL: `http://<host>:9005`
 
 ## 6. MOQ 视频流接口
 
+当前 Agents 页签的 Videos 区域使用集成在 9005 WebUI 内的 MOQ 订阅和浏览器播放桥接。订阅入口是 `POST /api/subscriber/start`，浏览器预览通过 WebTransport `/wt/preview` 接收 metadata、MP4 init segment 和 fMP4 fragments，并通过 MediaSource Extensions 渲染。
+
 ### GET /api/moq/status
 获取 MOQ 订阅状态
 
@@ -173,86 +175,129 @@ Base URL: `http://<host>:9005`
   "connected": true,
   "relay_host": "localhost",
   "relay_port": 9003,
-  "subscribed_tracks": ["agent001_camera", "agent001_thermal"],
+  "subscribed_tracks": ["manual_video_h264-live"],
+  "discovered_tracks": [],
+  "subscription_debug": [],
   "timestamp": "2026-04-10T10:00:00.000000"
 }
 ```
 
-### POST /api/moq/subscribe
-订阅 MOQ 视频 track
+### GET /api/moq/tracks
+获取当前 WebUI 已知的视频轨道和已订阅轨道。
+
+**响应示例：**
+```json
+{
+  "status": "success",
+  "tracks": [],
+  "subscribed_tracks": [],
+  "timestamp": "2026-04-10T10:00:00.000000"
+}
+```
+
+### POST /api/subscriber/start
+订阅或切换一个浏览器预览轨道。`namespace` 和 `trackName` 都是必填项，且必须与 publisher 发布到 MOQ relay 的真实轨道匹配。
 
 **请求格式：**
 ```json
 {
-  "track_id": "agent001_camera",
-  "namespace": ["acn", "agent", "agent001"],
-  "track_name": "camera"
+  "namespace": "video",
+  "trackName": "h264-live"
 }
 ```
+
+**响应示例：**
+```json
+{
+  "ok": true,
+  "status": "success",
+  "track": {
+    "trackId": "manual_video_h264-live",
+    "namespace": "/video",
+    "trackName": "h264-live",
+    "watchState": "subscribed"
+  },
+  "subscribed_tracks": ["manual_video_h264-live"],
+  "player": {
+    "trackId": "manual_video_h264-live",
+    "host": "localhost",
+    "port": 9005,
+    "path": "/wt/preview",
+    "certHash": "..."
+  },
+  "timestamp": "2026-04-10T10:00:00.000000"
+}
+```
+
+### DELETE /api/moq/tracks/{track_id}
+从 WebUI 轨道列表中移除一个轨道，并清理该轨道的订阅/预览状态。
+
+**示例：** `DELETE /api/moq/tracks/manual_video_h264-live`
 
 **响应示例：**
 ```json
 {
   "status": "success",
-  "track_id": "agent001_camera",
-  "namespace": ["acn", "agent", "agent001"],
-  "track_name": "camera",
+  "trackId": "manual_video_h264-live",
   "timestamp": "2026-04-10T10:00:00.000000"
 }
 ```
 
-### POST /api/moq/unsubscribe/{track_id}
-取消订阅
+### GET /api/video/stream/{track_id}/info
+获取某个轨道的浏览器播放/转码状态。
 
-**示例：** `POST /api/moq/unsubscribe/agent001_camera`
+**示例：** `GET /api/video/stream/manual_video_h264-live/info`
 
 **响应示例：**
 ```json
 {
-  "status": "success",
-  "track_id": "agent001_camera",
-  "timestamp": "2026-04-10T10:00:00.000000"
+  "track_id": "manual_video_h264-live",
+  "status": "active",
+  "watch_state": "subscribed",
+  "has_metadata": true,
+  "has_init_segment": true,
+  "fragment_count": 120,
+  "has_frame": true,
+  "width": 1280,
+  "height": 720,
+  "metadata": {
+    "container": "fMP4",
+    "codec": "H.264",
+    "mime_type": "video/mp4; codecs=\"avc1.64001F\"",
+    "mse_codec": "avc1.64001F"
+  }
 }
 ```
 
-### POST /api/moq/auto-subscribe/{agent_id}
-自动订阅 agent 的视频流
+### GET /api/video/stream/{track_id}/mjpeg
+HTTP MJPEG fallback 流。主预览路径仍是 WebTransport + MediaSource。
 
-**示例：** `POST /api/moq/auto-subscribe/agent001`
+### GET /api/video/stream/{track_id}/latest
+获取最新一帧 JPEG snapshot。
 
-**响应示例：**
+### 浏览器播放约束
+
+publisher 输出建议为 H.264 fMP4：
+
+1. metadata JSON，建议作为第一个对象
+2. fMP4 init segment，必须包含 `ftyp` 和 `moov`
+3. 连续 fMP4 media fragments，通常是可追加到 MSE 的 `moof` / `mdat`
+
+metadata 推荐字段：
+
 ```json
 {
-  "status": "success",
-  "agent_id": "agent001",
-  "results": [
-    {"track_id": "agent001_camera", "success": true},
-    {"track_id": "agent001_thermal", "success": true}
-  ],
-  "timestamp": "2026-04-10T10:00:00.000000"
+  "container": "fMP4",
+  "codec": "H.264",
+  "mime_type": "video/mp4; codecs=\"avc1.64001F\"",
+  "mse_codec": "avc1.64001F",
+  "width": 1280,
+  "height": 720,
+  "fps": 30
 }
 ```
 
-### GET /api/moq/tracks/{track_id}/frames?limit=10
-获取 track 的最近帧
-
-**响应示例：**
-```json
-{
-  "track_id": "agent001_camera",
-  "frame_count": 30,
-  "frames": [
-    {
-      "group_id": 1,
-      "object_id": 1,
-      "timestamp": "2026-04-10T10:00:00.000000",
-      "frame_type": "keyframe",
-      "payload_size": 45000
-    }
-  ],
-  "timestamp": "2026-04-10T10:00:00.000000"
-}
-```
+浏览器会通过 `MediaSource.isTypeSupported(mime_type)` 校验格式支持。不适合直接输入当前浏览器预览的格式包括 raw H.264 Annex-B、RTP/RTSP、MPEG-TS、一次性完整 MP4 文件对象流，以及未适配 metadata / MSE 逻辑的其他容器。
 
 ---
 
@@ -303,10 +348,10 @@ Base URL: `http://<host>:9005`
 
 ```bash
 # 1. 健康检查
-curl http://localhost:9005/api/health
+curl -k https://localhost:9005/api/health
 
 # 2. 发送流程日志
-curl -X POST http://localhost:9005/acn/v3/pipeline-logs \
+curl -k -X POST https://localhost:9005/acn/v3/pipeline-logs \
   -H "Content-Type: application/json" \
   -d '{
     "source": "Agent GW",
@@ -315,7 +360,7 @@ curl -X POST http://localhost:9005/acn/v3/pipeline-logs \
   }'
 
 # 3. 发送 Agent 状态更新
-curl -X POST http://localhost:9005/acn/v3/element-logs \
+curl -k -X POST https://localhost:9005/acn/v3/element-logs \
   -H "Content-Type: application/json" \
   -d '{
     "element_id": "IDM",
@@ -327,8 +372,13 @@ curl -X POST http://localhost:9005/acn/v3/element-logs \
   }'
 
 # 4. 获取日志
-curl http://localhost:9005/api/logs
+curl -k https://localhost:9005/api/logs
 
-# 5. MOQ 自动订阅
-curl -X POST http://localhost:9005/api/moq/auto-subscribe/agent001
+# 5. MOQ 视频订阅
+curl -k -X POST https://localhost:9005/api/subscriber/start \
+  -H "Content-Type: application/json" \
+  -d '{
+    "namespace": "video",
+    "trackName": "h264-live"
+  }'
 ```

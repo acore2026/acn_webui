@@ -16,6 +16,7 @@ import inspect
 import json
 import logging
 import ipaddress
+import socket
 import tempfile
 from collections import deque
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta
 from email.utils import formatdate
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import quote, unquote
+from urllib.parse import quote, unquote, urlparse
 
 from aioquic.asyncio import QuicConnectionProtocol, serve
 from aioquic.h3.connection import H3_ALPN, H3Connection
@@ -43,7 +44,7 @@ from cryptography.x509.oid import NameOID
 import sys
 import os
 
-WEBUI_ROOT = "/root/lpx/webui"
+WEBUI_ROOT = str(Path(__file__).resolve().parents[2])
 MOQ_PATH = os.path.join(WEBUI_ROOT, "moq")
 
 original_path = sys.path.copy()
@@ -62,9 +63,9 @@ os.environ["PYTHONPATH"] = WEBUI_ROOT + ":" + os.environ.get("PYTHONPATH", "")
 import moq
 
 moq_module_path = getattr(moq, "__file__", None) or ""
-if moq_module_path and "/root/lpx/webui/moq" not in moq_module_path:
+if moq_module_path and MOQ_PATH not in moq_module_path:
     raise ImportError(
-        f"错误的moq模块被加载: {moq_module_path}. 请确保使用 /root/lpx/webui/moq"
+        f"错误的moq模块被加载: {moq_module_path}. 请确保使用 {MOQ_PATH}"
     )
 
 from moq.sub.subscriber import MOQSubscriber, ReceivedObject
@@ -73,11 +74,17 @@ from moq.messages import ObjectStatus
 
 logger = logging.getLogger(__name__)
 
-WEBTRANSPORT_HOST = "127.0.0.1"
-WEBTRANSPORT_PORT = 4433
+MOQ_RELAY_HOST = os.environ.get("MOQ_RELAY_HOST", "localhost")
+MOQ_RELAY_PORT = int(os.environ.get("MOQ_RELAY_PORT", "9003"))
+WEBUI_PORT = int(os.environ.get("BACKEND_PORT", "9005"))
+WEBTRANSPORT_BIND_HOST = os.environ.get("MOQ_WEBTRANSPORT_BIND_HOST", "0.0.0.0")
+WEBTRANSPORT_HOST = os.environ.get("MOQ_WEBTRANSPORT_HOST", "127.0.0.1")
+WEBTRANSPORT_PUBLIC_HOST = os.environ.get("MOQ_WEBTRANSPORT_PUBLIC_HOST", WEBTRANSPORT_HOST)
+WEBTRANSPORT_PORT = int(os.environ.get("MOQ_WEBTRANSPORT_PORT", str(WEBUI_PORT)))
 WEBTRANSPORT_PATH_PREFIX = "/wt"
 WEBTRANSPORT_CERT_VALIDITY_DAYS = 7
 MAX_REPLAY_FRAGMENTS = 8
+TRACK_READY_TIMEOUT = 5.0
 DEFAULT_MSE_CODEC = "avc1.64001F"
 SETTINGS_WT_MAX_SESSIONS = 0x14E9CD29
 WT_MAX_SESSIONS = 24
@@ -88,8 +95,10 @@ FRAME_TYPE_FRAGMENT = 0x03
 FRAME_TYPE_END = 0x04
 
 ALLOWED_WEB_ORIGINS = {
-    "http://127.0.0.1:9005",
-    "http://localhost:9005",
+    f"http://127.0.0.1:{WEBUI_PORT}",
+    f"http://localhost:{WEBUI_PORT}",
+    f"https://127.0.0.1:{WEBUI_PORT}",
+    f"https://localhost:{WEBUI_PORT}",
 }
 
 
@@ -206,11 +215,26 @@ def generate_webtransport_certificate(
     key = ec.generate_private_key(ec.SECP256R1())
     subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, host)])
 
-    san_values = [x509.DNSName("localhost")]
+    san_hosts = {
+        "localhost",
+        "127.0.0.1",
+        host,
+        WEBTRANSPORT_PUBLIC_HOST,
+        os.environ.get("WEBUI_PUBLIC_HOST", ""),
+        socket.gethostname(),
+        socket.getfqdn(),
+    }
     try:
-        san_values.append(x509.IPAddress(ipaddress.ip_address(host)))
-    except ValueError:
-        san_values.append(x509.DNSName(host))
+        san_hosts.update(socket.gethostbyname_ex(socket.gethostname())[2])
+    except OSError:
+        pass
+
+    san_values = []
+    for san_host in sorted(item for item in san_hosts if item):
+        try:
+            san_values.append(x509.IPAddress(ipaddress.ip_address(san_host)))
+        except ValueError:
+            san_values.append(x509.DNSName(san_host))
 
     cert = (
         x509.CertificateBuilder()
@@ -238,6 +262,19 @@ def generate_webtransport_certificate(
 
     cert_hash = hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
     return cert_path, key_path, cert_hash, temp_dir
+
+
+def is_allowed_web_origin(origin: str, allowed_origins: set[str]) -> bool:
+    if not origin or origin in allowed_origins:
+        return True
+    parsed = urlparse(origin)
+    if parsed.scheme == "https" and parsed.port == WEBUI_PORT:
+        return True
+    return (
+        parsed.scheme == "http"
+        and parsed.hostname in {"127.0.0.1", "localhost"}
+        and parsed.port == WEBUI_PORT
+    )
 
 
 class TrackBridgeState:
@@ -428,16 +465,15 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
             self._reject_session(event.stream_id, 400)
             return
 
-        if origin and origin not in self._allowed_origins:
+        if origin and not is_allowed_web_origin(origin, self._allowed_origins):
             self._reject_session(event.stream_id, 403)
             return
 
         track_id = unquote(path[len(WEBTRANSPORT_PATH_PREFIX) :].lstrip("/"))
-        if not track_id:
-            self._reject_session(event.stream_id, 400)
-            return
-
-        bridge = self._subscriber.get_or_create_bridge(track_id)
+        if not track_id or track_id == "preview":
+            bridge = self._subscriber.get_preview_bridge()
+        else:
+            bridge = self._subscriber.get_or_create_bridge(track_id)
         self.http.send_headers(
             stream_id=event.stream_id,
             headers=[
@@ -488,7 +524,11 @@ class BrowserBridgeProtocol(QuicConnectionProtocol):
 
 
 class MOQVideoSubscriber:
-    def __init__(self, relay_host: str = "localhost", relay_port: int = 9003):
+    def __init__(
+        self,
+        relay_host: str = MOQ_RELAY_HOST,
+        relay_port: int = MOQ_RELAY_PORT,
+    ):
         self.relay_host = relay_host
         self.relay_port = relay_port
 
@@ -506,6 +546,10 @@ class MOQVideoSubscriber:
         self._track_object_counts: Dict[str, int] = {}
         self._frame_buffers: Dict[str, List[VideoFrameData]] = {}
         self._bridges: Dict[str, TrackBridgeState] = {}
+        self._preview_track_id: Optional[str] = None
+        self._preview_bridge = TrackBridgeState("__preview__")
+        self._track_ready_events: Dict[str, asyncio.Event] = {}
+        self._track_subscription_events: Dict[str, asyncio.Event] = {}
         self._discovered_tracks: Dict[str, DiscoveredVideoTrack] = {}
         self._watched_tracks: set[str] = set()
 
@@ -537,6 +581,126 @@ class MOQVideoSubscriber:
             bridge = TrackBridgeState(track_id)
             self._bridges[track_id] = bridge
         return bridge
+
+    def get_preview_bridge(self) -> TrackBridgeState:
+        return self._preview_bridge
+
+    def _get_track_ready_event(self, track_id: str) -> asyncio.Event:
+        event = self._track_ready_events.get(track_id)
+        if event is None:
+            event = asyncio.Event()
+            self._track_ready_events[track_id] = event
+        return event
+
+    def _get_track_subscription_event(self, track_id: str) -> asyncio.Event:
+        event = self._track_subscription_events.get(track_id)
+        if event is None:
+            event = asyncio.Event()
+            self._track_subscription_events[track_id] = event
+        return event
+
+    def _mark_track_ready_if_possible(self, track_id: str) -> None:
+        bridge = self._bridges.get(track_id)
+        if bridge and bridge.init_segment is not None:
+            self._get_track_ready_event(track_id).set()
+
+    async def _wait_for_track_ready(self, track_id: str) -> bool:
+        bridge = self._bridges.get(track_id)
+        if bridge and bridge.init_segment is not None:
+            return True
+
+        try:
+            await asyncio.wait_for(
+                self._get_track_ready_event(track_id).wait(),
+                timeout=TRACK_READY_TIMEOUT,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[MOQ] Timed out waiting for browser init data on %s",
+                track_id,
+            )
+            return False
+
+    async def _wait_for_track_subscription(self, track_id: str, timeout: float = 3.0) -> bool:
+        try:
+            await asyncio.wait_for(
+                self._get_track_subscription_event(track_id).wait(),
+                timeout=timeout,
+            )
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("[MOQ] Timed out waiting for subscription acceptance on %s", track_id)
+            return False
+
+    async def _wait_for_track_alias(self, track_id: str, timeout: float = 1.0) -> bool:
+        full_track_name = self._video_tracks.get(track_id)
+        if not self._subscriber or full_track_name is None:
+            return False
+
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            track_aliases = getattr(self._subscriber, "_track_aliases", {})
+            if any(saved_track == full_track_name for saved_track in track_aliases.values()):
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    async def _fetch_track_bootstrap(self, track_id: str) -> None:
+        full_track_name = self._video_tracks.get(track_id)
+        if not self._subscriber or full_track_name is None:
+            return
+
+        await self._wait_for_track_subscription(track_id)
+        if not await self._wait_for_track_alias(track_id, timeout=2.0):
+            logger.warning("[MOQ] Track alias was not ready for bootstrap fetch on %s", track_id)
+            return
+        try:
+            request_id = await self._subscriber.fetch(
+                full_track_name,
+                start_group=1,
+                start_object=1,
+                end_group=1,
+                end_object=8,
+            )
+            if request_id < 0:
+                logger.warning("[MOQ] Bootstrap fetch was rejected locally for %s", track_id)
+        except Exception as exc:
+            logger.warning("[MOQ] Bootstrap fetch failed for %s: %s", track_id, exc)
+
+    def _reset_preview_bridge(self) -> None:
+        self._preview_bridge.end_stream()
+        self._preview_bridge.metadata = None
+        self._preview_bridge.init_segment = None
+        self._preview_bridge.recent_fragments.clear()
+        self._preview_bridge.latest_jpeg = None
+        self._preview_bridge.latest_jpeg_fragment_count = 0
+        self._preview_bridge.latest_jpeg_sequence = 0
+        self._preview_bridge.total_bytes = 0
+        self._preview_bridge.total_fragments = 0
+
+    def _restore_preview_track(self, track_id: str) -> None:
+        self._reset_preview_bridge()
+        bridge = self._bridges.get(track_id)
+        if bridge is None:
+            return
+
+        if bridge.metadata is not None:
+            self._preview_bridge.set_metadata(bridge.metadata)
+        if bridge.init_segment is not None:
+            self._preview_bridge.set_init_segment(bridge.init_segment)
+        for fragment in bridge.recent_fragments:
+            self._preview_bridge.push_fragment(fragment)
+
+    async def switch_preview_track(self, track_id: str) -> bool:
+        self._preview_track_id = track_id
+        bridge = self._bridges.get(track_id)
+        if bridge is None or bridge.init_segment is None:
+            await self._fetch_track_bootstrap(track_id)
+        ready = await self._wait_for_track_ready(track_id)
+        self._restore_preview_track(track_id)
+        logger.info("[MOQ] Switched browser preview to %s", track_id)
+        return ready
 
     async def start(self):
         if self._running:
@@ -576,6 +740,8 @@ class MOQVideoSubscriber:
         for bridge in self._bridges.values():
             bridge.close_all_sessions()
             await self._shutdown_mjpeg_transcoder(bridge)
+        self._preview_bridge.close_all_sessions()
+        self._reset_preview_bridge()
 
         if self._cert_dir is not None:
             self._cert_dir.cleanup()
@@ -595,7 +761,7 @@ class MOQVideoSubscriber:
         self._cert_hash = cert_hash
         self._cert_dir = cert_dir
         self._webtransport_server = await serve(
-            WEBTRANSPORT_HOST,
+            WEBTRANSPORT_BIND_HOST,
             WEBTRANSPORT_PORT,
             configuration=quic_config,
             create_protocol=lambda *args, **kwargs: BrowserBridgeProtocol(
@@ -607,7 +773,7 @@ class MOQVideoSubscriber:
         )
         logger.info(
             "[MOQ WT] Listening at https://%s:%d%s (cert sha256=%s)",
-            WEBTRANSPORT_HOST,
+            WEBTRANSPORT_BIND_HOST,
             WEBTRANSPORT_PORT,
             WEBTRANSPORT_PATH_PREFIX,
             cert_hash,
@@ -658,13 +824,17 @@ class MOQVideoSubscriber:
             return False
 
         try:
-            request_id = await self._subscriber.fetch(
-                full_track_name,
-                start_group=1,
-                start_object=1,
-            )
-            if request_id < 0:
-                raise RuntimeError("fetch request was rejected locally")
+            existing_subscriptions = getattr(self._subscriber, "_subscriptions", {})
+            if full_track_name not in existing_subscriptions:
+                subscribed = await self._subscriber.subscribe(
+                    full_track_name,
+                    start_group=1,
+                    start_object=1,
+                )
+                if not subscribed:
+                    raise RuntimeError("subscribe request was rejected locally")
+            else:
+                self._get_track_subscription_event(track_id).set()
 
             self._track_states[track_id] = "subscribed"
             discovered = self._discovered_tracks.get(track_id)
@@ -689,7 +859,7 @@ class MOQVideoSubscriber:
         namespace_parts = [part for part in namespace if part]
         namespace_str = "/" + "/".join(namespace_parts) if namespace_parts else "/"
         full_track_name = FullTrackName(
-            namespace=[namespace_str.encode()],
+            namespace=[part.encode("utf-8") for part in namespace_parts],
             track_name=track_name.encode()
             if isinstance(track_name, str)
             else track_name,
@@ -701,6 +871,8 @@ class MOQVideoSubscriber:
         self._track_object_counts.setdefault(track_id, 0)
         self._frame_buffers.setdefault(track_id, [])
         self.get_or_create_bridge(track_id)
+        self._get_track_ready_event(track_id)
+        subscription_event = self._get_track_subscription_event(track_id)
 
         discovered = self._discovered_tracks.get(track_id)
         if discovered:
@@ -708,6 +880,10 @@ class MOQVideoSubscriber:
             discovered.last_error = None
 
         if self._subscriber:
+            full_track_name = self._video_tracks.get(track_id)
+            existing_subscriptions = getattr(self._subscriber, "_subscriptions", {})
+            if full_track_name not in existing_subscriptions:
+                subscription_event.clear()
             return await self._subscribe_registered_track(track_id)
         return True
 
@@ -728,6 +904,11 @@ class MOQVideoSubscriber:
             bridge.end_stream()
             await self._shutdown_mjpeg_transcoder(bridge)
             bridge.reset()
+        self._track_ready_events.pop(track_id, None)
+        self._track_subscription_events.pop(track_id, None)
+        if self._preview_track_id == track_id:
+            self._preview_track_id = None
+            self._reset_preview_bridge()
 
         if self._subscriber:
             try:
@@ -740,9 +921,6 @@ class MOQVideoSubscriber:
 
     def get_subscribed_tracks(self) -> List[str]:
         return sorted(self._watched_tracks)
-
-    def get_frame_buffer(self, track_id: str) -> List[VideoFrameData]:
-        return self._frame_buffers.get(track_id, [])
 
     def get_track_debug_info(self) -> List[Dict[str, Any]]:
         rows = []
@@ -842,6 +1020,11 @@ class MOQVideoSubscriber:
         self._track_states.pop(track_id, None)
         self._track_object_counts.pop(track_id, None)
         self._frame_buffers.pop(track_id, None)
+        self._track_ready_events.pop(track_id, None)
+        self._track_subscription_events.pop(track_id, None)
+        if self._preview_track_id == track_id:
+            self._preview_track_id = None
+            self._reset_preview_bridge()
         self._discovered_tracks.pop(track_id, None)
         return True
 
@@ -853,8 +1036,22 @@ class MOQVideoSubscriber:
             "trackId": track_id,
             "host": host or WEBTRANSPORT_HOST,
             "port": WEBTRANSPORT_PORT,
-            "path": f"{WEBTRANSPORT_PATH_PREFIX}/{quote(track_id, safe='')}",
+            "path": f"{WEBTRANSPORT_PATH_PREFIX}/preview",
             "certHash": self._cert_hash,
+        }
+
+    def get_preview_bridge_snapshot(self) -> Dict[str, Any]:
+        return {
+            "metadata": self._preview_bridge.metadata,
+            "initSegmentBase64": (
+                base64.b64encode(self._preview_bridge.init_segment).decode("ascii")
+                if self._preview_bridge.init_segment is not None
+                else None
+            ),
+            "recentFragmentsBase64": [
+                base64.b64encode(fragment).decode("ascii")
+                for fragment in self._preview_bridge.recent_fragments
+            ],
         }
 
     async def get_latest_jpeg_frame(self, track_id: str) -> Optional[bytes]:
@@ -883,28 +1080,6 @@ class MOQVideoSubscriber:
             "metadata": metadata,
         }
 
-    def get_bridge_snapshot(self, track_id: str) -> Dict[str, Any]:
-        bridge = self._bridges.get(track_id)
-        if bridge is None:
-            return {
-                "metadata": None,
-                "initSegmentBase64": None,
-                "recentFragmentsBase64": [],
-            }
-
-        return {
-            "metadata": bridge.metadata,
-            "initSegmentBase64": (
-                base64.b64encode(bridge.init_segment).decode("ascii")
-                if bridge.init_segment is not None
-                else None
-            ),
-            "recentFragmentsBase64": [
-                base64.b64encode(fragment).decode("ascii")
-                for fragment in bridge.recent_fragments
-            ],
-        }
-
     def _on_connected(self):
         logger.info("[MOQ] Connected to MOQ Relay")
 
@@ -921,6 +1096,7 @@ class MOQVideoSubscriber:
                     discovered.watch_state = "subscribed"
                     discovered.last_error = None
                 logger.info("[MOQ] Subscription accepted for track: %s", track_id)
+                self._get_track_subscription_event(track_id).set()
                 if self._on_track_subscribed:
                     self._on_track_subscribed(track_id)
                 break
@@ -934,6 +1110,7 @@ class MOQVideoSubscriber:
                     discovered.watch_state = "error"
                     discovered.last_error = reason
                 logger.warning("[MOQ] Subscription rejected for %s: %s", track_id, reason)
+                self._get_track_subscription_event(track_id).set()
                 break
 
     def _on_object_received(self, obj: ReceivedObject):
@@ -970,6 +1147,8 @@ class MOQVideoSubscriber:
 
                 if obj.object_status == ObjectStatus.END_OF_SUBGROUP:
                     bridge.end_stream()
+                    if track_id == self._preview_track_id:
+                        self._preview_bridge.end_stream()
                     await self._shutdown_mjpeg_transcoder(bridge)
                     self._append_buffer(
                         track_id,
@@ -989,6 +1168,8 @@ class MOQVideoSubscriber:
                     if parsed_metadata is not None:
                         metadata = build_browser_metadata(parsed_metadata)
                         bridge.set_metadata(metadata)
+                        if track_id == self._preview_track_id:
+                            self._preview_bridge.set_metadata(metadata)
                         if discovered:
                             discovered.metadata = metadata
                         self._append_buffer(
@@ -1011,9 +1192,14 @@ class MOQVideoSubscriber:
                         )
                         if updated_metadata != bridge.metadata:
                             bridge.set_metadata(updated_metadata)
+                            if track_id == self._preview_track_id:
+                                self._preview_bridge.set_metadata(updated_metadata)
                             if discovered:
                                 discovered.metadata = updated_metadata
                     bridge.set_init_segment(obj.payload)
+                    self._mark_track_ready_if_possible(track_id)
+                    if track_id == self._preview_track_id:
+                        self._preview_bridge.set_init_segment(obj.payload)
                     await self._restart_mjpeg_transcoder(track_id, bridge)
                     self._append_buffer(
                         track_id,
@@ -1029,16 +1215,7 @@ class MOQVideoSubscriber:
                     continue
 
                 if bridge.init_segment is None:
-                    if bridge.metadata is not None:
-                        updated_metadata = build_browser_metadata(
-                            bridge.metadata, init_segment=obj.payload
-                        )
-                        if updated_metadata != bridge.metadata:
-                            bridge.set_metadata(updated_metadata)
-                            if discovered:
-                                discovered.metadata = updated_metadata
-                    bridge.set_init_segment(obj.payload)
-                    await self._restart_mjpeg_transcoder(track_id, bridge)
+                    bridge.push_fragment(obj.payload)
                     self._append_buffer(
                         track_id,
                         VideoFrameData(
@@ -1047,12 +1224,14 @@ class MOQVideoSubscriber:
                             object_id=obj.object_id,
                             timestamp=datetime.utcnow(),
                             payload=obj.payload,
-                            frame_type="init",
+                            frame_type="fragment",
                         ),
                     )
                     continue
 
                 bridge.push_fragment(obj.payload)
+                if track_id == self._preview_track_id:
+                    self._preview_bridge.push_fragment(obj.payload)
                 await self._push_fragment_to_mjpeg_transcoder(track_id, bridge, obj.payload)
                 self._append_buffer(
                     track_id,
