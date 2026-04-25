@@ -2,7 +2,7 @@
 
 [English Version](./README.md)
 
-ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN agents、任务、网络组件、后端日志以及 MOQ 视频轨道。
+ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN agents、任务、网络组件、后端日志、证书、服务生命周期控制以及 MOQ 视频轨道。
 
 当前主路径是集成式 WebUI，运行在 `9005` 端口。它由 FastAPI 提供后端和静态前端，并通过 WebSocket 推送实时更新。
 
@@ -28,6 +28,9 @@ ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN age
 - 暴露 dashboard API
 - 从外部 SQLite 数据库读取 agents 和 tasks
 - 汇总后端日志与网络组件日志
+- 在 WebUI clear 之后隐藏旧的组件日志显示，但不修改源日志文件
+- 管理证书上传/删除元数据，并把证书请求转发给 IDM
+- 通过脚本控制 ACN Agent、AgentGW 和 IDM 的启动、停止、重启
 - 管理 MOQ 轨道发现、订阅、取消订阅和浏览器播放
 - 通过 WebSocket 推送 dashboard 快照和任务更新
 
@@ -143,6 +146,8 @@ cd /root/lpx/webui
 ### Control
 
 - `POST /api/control/clear`
+- `GET /api/control/network-elements`
+- `POST /api/control/network-elements/{element_id}/{action}`
 - `POST /api/control/test-messages/topology-demo`
 - `POST /api/control/test-messages/topology-demo/pause`
 - `POST /api/control/test-messages/topology-demo/resume`
@@ -150,6 +155,36 @@ cd /root/lpx/webui
 - `GET /api/control/tasks`
 - `POST /api/control/tasks`
 - `POST /api/control/tasks/{task_id}/stop`
+
+网络组件生命周期控制支持：
+- `element_id`: `acn-agent`、`agent-gw`、`idm` 或 `all`
+- `action`: `start`、`stop` 或 `restart`
+- `all/start` 只启动当前显示为离线的组件
+- `all/restart` 会重启所有受控组件
+
+后端会执行这些脚本：
+- ACN Agent: `/home/acn/cxr/acn_agent/start_acn_agent.sh`
+- AgentGW: `/home/acn/zqm/acn_gw/start_agent_gw.sh`
+- IDM: `/home/acn/cx/idm/start_idm.sh`
+
+WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允许点击 Start。
+
+### Settings
+
+- `GET /api/settings/data-source`
+- `POST /api/settings/data-source`
+- `GET /api/settings/certificates`
+- `POST /api/settings/certificates/upload`
+- `DELETE /api/settings/certificates/{cert_id}`
+- `GET /api/settings/direct-demo-camera`
+- `POST /api/settings/direct-demo-camera`
+- `POST /api/settings/virtual-agents`
+
+证书上传行为：
+- 后端按 X.509 解码上传的证书文件
+- 只有 IDM 返回 `200 OK` 后，才把证书元数据保存到 WebUI 本地证书数据库
+- 证书上传/删除请求会转发给 IDM
+- IDM 失败响应会显示在 WebUI，并写入后端日志
 
 ### MOQ / 视频轨道管理
 
@@ -203,6 +238,21 @@ cd /root/lpx/webui
   - `/home/acn/cx/idm/logs`
 - ARF 清理接口：
   - `http://localhost:9001/clear`
+- WebUI 本地状态数据库：
+  - `logs/webui_local_state.db`
+- WebUI 证书数据库：
+  - `logs/certificates.db`
+- WebUI 证书文件缓存：
+  - `logs/cert_store`
+- WebUI 运行时设置：
+  - `logs/data_source_settings.json`
+  - `logs/direct_demo_settings.json`
+
+重要日志行为：
+- WebUI clear 不会截断或删除源组件日志文件
+- 成功执行 `/api/control/clear` 后，WebUI 会在内存中记录当前源日志文件偏移量
+- 之后 `/api/network-element-logs` 只返回 clear 之后新追加的日志行
+- 如果重启 WebUI 后端，内存中的偏移量会丢失，旧的文件日志可能再次显示
 
 ## Agent 与 Task 如何同步
 

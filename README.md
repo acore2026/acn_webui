@@ -2,7 +2,7 @@
 
 [中文说明](./README.zh-CN.md)
 
-ACN WebUI is a FastAPI + React dashboard for monitoring ACN agents, tasks, network elements, backend logs, and MOQ video tracks.
+ACN WebUI is a FastAPI + React dashboard for monitoring ACN agents, tasks, network elements, backend logs, certificates, service lifecycle controls, and MOQ video tracks.
 
 The main product path is the integrated WebUI on port `9005`. It serves the built frontend from the FastAPI backend and pushes live updates over WebSocket.
 
@@ -28,6 +28,9 @@ It is responsible for:
 - exposing the dashboard APIs
 - reading agents and tasks from the external SQLite database
 - collecting backend and element logs
+- filtering element-log display after WebUI clear without modifying source log files
+- managing certificate upload/delete metadata and forwarding certificate requests to IDM
+- running script-backed lifecycle controls for ACN Agent, AgentGW, and IDM
 - managing MOQ track discovery, watch, unsubscribe, and browser playback
 - pushing dashboard snapshots and task updates over WebSocket
 
@@ -143,6 +146,8 @@ It exposes:
 ### Control
 
 - `POST /api/control/clear`
+- `GET /api/control/network-elements`
+- `POST /api/control/network-elements/{element_id}/{action}`
 - `POST /api/control/test-messages/topology-demo`
 - `POST /api/control/test-messages/topology-demo/pause`
 - `POST /api/control/test-messages/topology-demo/resume`
@@ -150,6 +155,36 @@ It exposes:
 - `GET /api/control/tasks`
 - `POST /api/control/tasks`
 - `POST /api/control/tasks/{task_id}/stop`
+
+Network element lifecycle actions support:
+- `element_id`: `acn-agent`, `agent-gw`, `idm`, or `all`
+- `action`: `start`, `stop`, or `restart`
+- `all/start` starts only elements currently shown as offline
+- `all/restart` restarts all managed elements
+
+The backend executes these scripts:
+- ACN Agent: `/home/acn/cxr/acn_agent/start_acn_agent.sh`
+- AgentGW: `/home/acn/zqm/acn_gw/start_agent_gw.sh`
+- IDM: `/home/acn/cx/idm/start_idm.sh`
+
+The WebUI asks for secondary confirmation before stop/restart actions. Start is enabled only for offline elements.
+
+### Settings
+
+- `GET /api/settings/data-source`
+- `POST /api/settings/data-source`
+- `GET /api/settings/certificates`
+- `POST /api/settings/certificates/upload`
+- `DELETE /api/settings/certificates/{cert_id}`
+- `GET /api/settings/direct-demo-camera`
+- `POST /api/settings/direct-demo-camera`
+- `POST /api/settings/virtual-agents`
+
+Certificate upload behavior:
+- backend decodes uploaded cert files as X.509
+- stores metadata in the local WebUI certificate DB only after IDM returns `200 OK`
+- forwards certificate upload/delete requests to IDM
+- failed IDM responses are shown in the WebUI and logged in backend logs
 
 ### MOQ / video track management
 
@@ -203,6 +238,21 @@ The dashboard is not self-contained. The current backend reads from external ser
   - `/home/acn/cx/idm/logs`
 - ARF clear endpoint:
   - `http://localhost:9001/clear`
+- WebUI local state DB:
+  - `logs/webui_local_state.db`
+- WebUI certificate DB:
+  - `logs/certificates.db`
+- WebUI certificate file cache:
+  - `logs/cert_store`
+- WebUI runtime settings:
+  - `logs/data_source_settings.json`
+  - `logs/direct_demo_settings.json`
+
+Important log behavior:
+- source element logs are never truncated or deleted by WebUI clear
+- after a successful `/api/control/clear`, the WebUI records current source log offsets in memory
+- `/api/network-element-logs` then returns only lines appended after that clear point
+- restarting the WebUI backend resets those in-memory cutoffs, so older file-backed logs can appear again
 
 ## How Agent And Task Data Refresh
 
