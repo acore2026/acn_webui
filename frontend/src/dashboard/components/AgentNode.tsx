@@ -63,8 +63,8 @@ export const AgentNode = ({ data, selected }: NodeProps<AgentFlowNode>) => {
           <dd className="theme-copy mt-1 text-sm font-medium">{data.region}</dd>
         </div>
         <div className="theme-subtle-card p-3">
-          <dt className="theme-muted uppercase tracking-[0.18em]">Throughput</dt>
-          <dd className="theme-copy mt-1 text-sm font-medium">{data.throughput}</dd>
+          <dt className="theme-muted uppercase tracking-[0.18em]">Track</dt>
+          <dd className="theme-copy mt-1 text-sm font-medium">{data.trackSummary}</dd>
         </div>
       </dl>
     </div>

@@ -13,15 +13,27 @@ export interface MetricCardModel {
 
 export type AgentStatus = 'online' | 'busy' | 'offline';
 
+export interface TopologyAgentTrackModel {
+  id: string;
+  name: string;
+  taskId: string;
+  namespace: string;
+  watchState: string;
+  lastSeen: string;
+}
+
 export interface TopologyAgentModel {
   id: string;
   name: string;
   role: string;
   status: AgentStatus;
   region: string;
-  throughput: string;
+  trackSummary: string;
+  tracks: TopologyAgentTrackModel[];
   summary: string;
   uptime: string;
+  launchTime: string;
+  offlineTime: string;
   lastHeartbeat: string;
   taskCount: number;
   capabilities: string[];
@@ -89,6 +101,31 @@ export interface ControlTask {
   involvedAgents: ControlTaskAgent[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DatabaseSourceConfig {
+  useExternalDb: boolean;
+  externalDbPath: string;
+  externalDbExists: boolean;
+  localDbPath: string;
+  localDbExists: boolean;
+  activeSource: 'external' | 'local' | 'local-fallback' | string;
+}
+
+export interface CertificateRecord {
+  certID: string;
+  certName: string;
+  authority: string;
+  validity: string;
+  uploadedAt?: string;
+}
+
+export interface DirectDemoCameraConfig {
+  enabled: boolean;
+  running: boolean;
+  trackAvailable: boolean;
+  trackId: string;
+  trackName: string;
 }
 
 export interface VideoTrackModel {
@@ -161,6 +198,28 @@ export interface ElementGroupModel {
   status: ElementStatus;
   summary: string;
   components: ElementComponentModel[];
+}
+
+export type NetworkElementControlAction = 'start' | 'stop' | 'restart';
+
+export interface NetworkElementControlModel {
+  id: string;
+  name: string;
+  description: string;
+  scriptPath: string;
+  scriptExists: boolean;
+  status: ElementStatus;
+  summary: string;
+  components: ElementComponentModel[];
+}
+
+export interface NetworkElementControlResult {
+  elementId: string;
+  elementName: string;
+  action: NetworkElementControlAction;
+  exitCode: number;
+  stdout?: string;
+  stderr?: string;
 }
 
 export interface MessageFlowNodeModel {

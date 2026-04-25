@@ -66,6 +66,7 @@ export const AgentsPage = ({
     busy: isZh ? '忙碌' : 'busy',
     offline: isZh ? '离线' : 'offline'
   };
+  const trackSummaryEmpty = isZh ? '暂无轨道' : 'No track';
 
   useEffect(() => {
     if (selectedAgentId && !agents.some((agent) => agent.id === selectedAgentId)) {
@@ -203,8 +204,8 @@ export const AgentsPage = ({
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.region}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '吞吐量' : 'Throughput'}</dt>
-                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.throughput}</dd>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '轨道' : 'Track'}</dt>
+                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.trackSummary || trackSummaryEmpty}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
                   <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行中任务' : 'Running Tasks'}</dt>
@@ -215,7 +216,15 @@ export const AgentsPage = ({
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.uptime}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '最后心跳' : 'Last Heartbeat'}</dt>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '上线时间' : 'Launch Time'}</dt>
+                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.launchTime}</dd>
+                </div>
+                <div className="theme-subtle-card p-4">
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '离线时间' : 'Offline Time'}</dt>
+                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.offlineTime}</dd>
+                </div>
+                <div className="theme-subtle-card p-4">
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '最后消息时间' : 'Last Message Time'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.lastHeartbeat}</dd>
                 </div>
               </div>
@@ -232,6 +241,29 @@ export const AgentsPage = ({
                         {capability}
                       </span>
                     ))}
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '轨道信息' : 'Track Inventory'}</h4>
+                  <div className="mt-3 space-y-2">
+                    {selectedAgent.tracks.length ? (
+                      selectedAgent.tracks.map((track) => (
+                        <div key={track.id} className="theme-subtle-card px-4 py-3 text-sm">
+                          <p className="theme-title font-medium">{track.name}</p>
+                          <p className="theme-soft mt-1 leading-6">
+                            {isZh ? '任务' : 'Task'}: {track.taskId || '-'}
+                          </p>
+                          <p className="theme-soft leading-6">
+                            {isZh ? '命名空间' : 'Namespace'}: {track.namespace || '-'}
+                          </p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="theme-subtle-card theme-copy px-4 py-3 text-sm leading-6">
+                        {trackSummaryEmpty}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -339,8 +371,8 @@ export const AgentsPage = ({
         title={isZh ? '智能体名册' : 'Fleet Roster'}
         description={
           isZh
-            ? '点击任意智能体卡片即可打开专属详情窗口，查看其资料、健康状态、能力标签与任务负载。'
-            : 'Click an agent card to open a dedicated detail window with its profile, health, capabilities, and task load.'
+            ? '点击任意智能体卡片即可打开专属详情窗口，查看其资料、健康状态、视频轨道以及上线/离线时间。'
+            : 'Click an agent card to open a dedicated detail window with its profile, health, track inventory, and launch/offline timing.'
         }
       >
         <div className="grid gap-4 xl:grid-cols-2">
@@ -376,8 +408,12 @@ export const AgentsPage = ({
                     <dd className="theme-title mt-2 font-medium">{agent.region}</dd>
                   </div>
                   <div className="theme-subtle-card p-4">
-                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '吞吐量' : 'Throughput'}</dt>
-                    <dd className="theme-title mt-2 font-medium">{agent.throughput}</dd>
+                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '轨道' : 'Track'}</dt>
+                    <dd className="theme-title mt-2 font-medium">{agent.trackSummary || trackSummaryEmpty}</dd>
+                  </div>
+                  <div className="theme-subtle-card p-4 sm:col-span-2">
+                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '上线时间' : 'Launch Time'}</dt>
+                    <dd className="theme-title mt-2 font-medium">{agent.launchTime}</dd>
                   </div>
                 </dl>
                 <p className="theme-soft mt-4 text-sm leading-6">{agent.summary}</p>

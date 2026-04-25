@@ -1,4 +1,4 @@
-import { BaseEdge, EdgeLabelRenderer, EdgeProps, getBezierPath } from '@xyflow/react';
+import { BaseEdge, EdgeLabelRenderer, EdgeProps, Position } from '@xyflow/react';
 
 type FlowMessageEdgeData = {
   routeLabel: string;
@@ -8,6 +8,7 @@ type FlowMessageEdgeData = {
   bubbleOffsetY?: number;
   bubbleOffsetX?: number;
   curvature?: number;
+  bundleOffset?: number;
   bubbleAnchor?: 'source' | 'target' | 'mid';
   bubbleTail?: 'left' | 'right' | 'top' | 'bottom';
 };
@@ -27,6 +28,39 @@ const resolveBaseBubbleOffset = (tail?: FlowMessageEdgeData['bubbleTail']) => {
   }
 };
 
+const resolveControlPoint = (
+  x: number,
+  y: number,
+  position: Position,
+  distance: number,
+  bundleOffset: number
+) => {
+  switch (position) {
+    case Position.Left:
+      return { x: x - distance, y: y + bundleOffset };
+    case Position.Right:
+      return { x: x + distance, y: y + bundleOffset };
+    case Position.Top:
+      return { x: x + bundleOffset, y: y - distance };
+    case Position.Bottom:
+      return { x: x + bundleOffset, y: y + distance };
+    default:
+      return { x, y };
+  }
+};
+
+const resolveBezierPoint = (
+  start: number,
+  controlA: number,
+  controlB: number,
+  end: number,
+  t: number
+) =>
+  (1 - t) ** 3 * start +
+  3 * (1 - t) ** 2 * t * controlA +
+  3 * (1 - t) * t ** 2 * controlB +
+  t ** 3 * end;
+
 export const FlowMessageEdge = ({
   id,
   sourceX,
@@ -40,15 +74,27 @@ export const FlowMessageEdge = ({
   data,
 }: EdgeProps) => {
   const edgeData = (data ?? {}) as FlowMessageEdgeData;
-  const [edgePath, labelX, labelY] = getBezierPath({
+  const curvature = edgeData.curvature ?? 0.35;
+  const bundleOffset = edgeData.bundleOffset ?? 0;
+  const axisDistance = Math.max(Math.abs(targetX - sourceX), Math.abs(targetY - sourceY), 120);
+  const controlDistance = Math.max(48, axisDistance * curvature);
+  const sourceControl = resolveControlPoint(
     sourceX,
     sourceY,
     sourcePosition,
+    controlDistance,
+    bundleOffset
+  );
+  const targetControl = resolveControlPoint(
     targetX,
     targetY,
     targetPosition,
-    curvature: edgeData.curvature ?? 0.35,
-  });
+    controlDistance,
+    bundleOffset
+  );
+  const edgePath = `M ${sourceX},${sourceY} C ${sourceControl.x},${sourceControl.y} ${targetControl.x},${targetControl.y} ${targetX},${targetY}`;
+  const labelX = resolveBezierPoint(sourceX, sourceControl.x, targetControl.x, targetX, 0.5);
+  const labelY = resolveBezierPoint(sourceY, sourceControl.y, targetControl.y, targetY, 0.5);
 
   const anchorX =
     edgeData.bubbleAnchor === 'source'
@@ -67,6 +113,15 @@ export const FlowMessageEdge = ({
   return (
     <>
       <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} />
+      {edgeData.active ? (
+        <path
+          d={edgePath}
+          className="theme-topology-edge-direction"
+          style={{
+            stroke: typeof style?.stroke === 'string' ? style.stroke : '#06b6d4'
+          }}
+        />
+      ) : null}
       {edgeData.routeLabel ? (
         <EdgeLabelRenderer>
           <div

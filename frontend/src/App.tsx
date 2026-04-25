@@ -12,9 +12,13 @@ import useWebSocket from './hooks/useWebSocket';
 import {
   BackendLogEntry,
   ControlTask,
+  DatabaseSourceConfig,
   DashboardMockData,
   NavKey,
   NetworkElementLogGroup,
+  NetworkElementControlAction,
+  NetworkElementControlModel,
+  NetworkElementControlResult,
   VideoTrackDraft,
   VideoPlayerConfig,
   VideoPlayerBootstrap,
@@ -36,6 +40,32 @@ const emptyDashboardData: DashboardMockData = {
 };
 const defaultDemoStages: DemoStage[] = ['register', 'task', 'cooperate'];
 const TOPOLOGY_TEST_SPEED_STORAGE_KEY = 'topology-test-speed-v2';
+const DEMO_INCLUDE_TOPOLOGY_TEST_STORAGE_KEY = 'dashboard-demo-include-topology-test';
+const buildDemoTiming = (speed: number) => {
+  const safeSpeed = Number.isFinite(speed) && speed > 0 ? speed : 1;
+  const displayTtlSeconds = Math.max(1.2, Number((2.4 / safeSpeed).toFixed(3)));
+
+  return {
+    fullDemoDelaySeconds: Number((0.22 / safeSpeed).toFixed(3)),
+    topologyDelaySeconds: Number((1.2 / safeSpeed).toFixed(3)),
+    displayTtlSeconds,
+    displayActiveSeconds: displayTtlSeconds
+  };
+};
+
+const parseOptionalJson = async <T,>(response: Response): Promise<T | null> => {
+  const text = await response.text();
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    throw new Error(trimmed.slice(0, 300));
+  }
+};
 
 const App = () => {
   const [activeTab, setActiveTab] = useState<NavKey>('overview');
@@ -51,21 +81,25 @@ const App = () => {
   const [elementLogs, setElementLogs] = useState<NetworkElementLogGroup[]>([]);
   const [elementLogsLoading, setElementLogsLoading] = useState(true);
   const [elementLogsError, setElementLogsError] = useState<string | null>(null);
+  const [networkElementControls, setNetworkElementControls] = useState<NetworkElementControlModel[]>([]);
+  const [networkElementBusyKey, setNetworkElementBusyKey] = useState<string | null>(null);
+  const [networkElementLastResult, setNetworkElementLastResult] = useState<NetworkElementControlResult | null>(null);
   const [controlTasks, setControlTasks] = useState<ControlTask[]>([]);
   const [controlTasksLoading, setControlTasksLoading] = useState(true);
   const [controlTasksError, setControlTasksError] = useState<string | null>(null);
   const [videoTracks, setVideoTracks] = useState<VideoTrackModel[]>([]);
   const [videoTracksLoading, setVideoTracksLoading] = useState(true);
   const [videoTracksError, setVideoTracksError] = useState<string | null>(null);
+  const [dataSourceConfig, setDataSourceConfig] = useState<DatabaseSourceConfig | null>(null);
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
-  const [topologyTestBusy, setTopologyTestBusy] = useState(false);
-  const [topologyTestPaused, setTopologyTestPaused] = useState(false);
-  const [topologyTestMessage, setTopologyTestMessage] = useState<string | null>(null);
   const [topologyTestSpeed, setTopologyTestSpeed] = useState<number>(() => {
     const stored = window.localStorage.getItem(TOPOLOGY_TEST_SPEED_STORAGE_KEY);
     const parsed = stored ? Number(stored) : 1;
     return Number.isFinite(parsed) && parsed >= 0.1 && parsed <= 2 ? parsed : 1;
+  });
+  const [demoIncludeTopologyTest, setDemoIncludeTopologyTest] = useState<boolean>(() => {
+    return window.localStorage.getItem(DEMO_INCLUDE_TOPOLOGY_TEST_STORAGE_KEY) === 'true';
   });
   const [fullDemoBusy, setFullDemoBusy] = useState(false);
   const [fullDemoMessage, setFullDemoMessage] = useState<string | null>(null);
@@ -110,6 +144,13 @@ const App = () => {
   useEffect(() => {
     window.localStorage.setItem(TOPOLOGY_TEST_SPEED_STORAGE_KEY, String(topologyTestSpeed));
   }, [topologyTestSpeed]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      DEMO_INCLUDE_TOPOLOGY_TEST_STORAGE_KEY,
+      demoIncludeTopologyTest ? 'true' : 'false'
+    );
+  }, [demoIncludeTopologyTest]);
 
   useEffect(() => {
     window.localStorage.setItem('dashboard-demo-stages', JSON.stringify(demoConfigStages));
@@ -240,6 +281,22 @@ const App = () => {
     }
   }, [isZh]);
 
+  const fetchNetworkElementControls = useCallback(async () => {
+    try {
+      const response = await fetch('/api/control/network-elements');
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = (await response.json()) as { elements?: NetworkElementControlModel[] };
+      setNetworkElementControls(Array.isArray(payload.elements) ? payload.elements : []);
+      return true;
+    } catch (error) {
+      console.error('Failed to load network element controls:', error);
+      return false;
+    }
+  }, []);
+
   useEffect(() => {
     void fetchNetworkElementLogs();
     const interval = window.setInterval(() => {
@@ -298,6 +355,22 @@ const App = () => {
     }
   }, [isZh]);
 
+  const fetchDataSourceConfig = useCallback(async () => {
+    try {
+      const response = await fetch('/api/settings/data-source');
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = (await response.json()) as { config?: DatabaseSourceConfig };
+      setDataSourceConfig(payload.config ?? null);
+      return true;
+    } catch (error) {
+      console.error('Failed to load data source settings:', error);
+      return false;
+    }
+  }, []);
+
   useEffect(() => {
     void fetchVideoTracks();
     const interval = window.setInterval(() => {
@@ -306,6 +379,14 @@ const App = () => {
 
     return () => window.clearInterval(interval);
   }, [fetchVideoTracks]);
+
+  useEffect(() => {
+    void fetchDataSourceConfig();
+  }, [fetchDataSourceConfig]);
+
+  useEffect(() => {
+    void fetchNetworkElementControls();
+  }, [fetchNetworkElementControls]);
 
   useEffect(() => {
     if (!lastMessage) {
@@ -379,24 +460,25 @@ const App = () => {
 
     try {
       const response = await fetch('/api/control/clear', { method: 'POST' });
-      const payload = (await response.json()) as {
+      const payload = await parseOptionalJson<{
         message?: string;
         dashboard?: DashboardMockData;
-        detail?: { error?: string; detail?: string };
-      };
+        detail?: string | { error?: string; detail?: string };
+      }>(response);
 
       if (!response.ok) {
+        const detail = payload?.detail;
         const errorMessage =
-          payload.detail?.error ||
-          payload.detail?.detail ||
+          (typeof detail === 'string' ? detail : detail?.error || detail?.detail) ||
+          payload?.message ||
           `Control request failed with HTTP ${response.status}.`;
         throw new Error(errorMessage);
       }
 
-      if (payload.dashboard) {
+      if (payload?.dashboard) {
         applySnapshot(payload.dashboard);
       }
-      if (Array.isArray((payload as { tasks?: ControlTask[] }).tasks)) {
+      if (Array.isArray((payload as { tasks?: ControlTask[] } | null)?.tasks)) {
         setControlTasks((payload as { tasks?: ControlTask[] }).tasks ?? []);
         setControlTasksLoading(false);
         setControlTasksError(null);
@@ -404,7 +486,7 @@ const App = () => {
 
       setControlBusy(false);
       setControlTone('success');
-      setControlMessage(payload.message || (isZh ? '环境清理成功。' : 'Environment cleared successfully.'));
+      setControlMessage(payload?.message || (isZh ? '环境清理成功。' : 'Environment cleared successfully.'));
       setDataError(null);
     } catch (error) {
       console.error('Failed to clear environment:', error);
@@ -548,6 +630,95 @@ const App = () => {
     [applySnapshot, isZh]
   );
 
+  const handleControlNetworkElement = useCallback(
+    async (elementId: string, action: NetworkElementControlAction) => {
+      const busyKey = `${elementId}:${action}`;
+      setNetworkElementBusyKey(busyKey);
+      setControlTone('warning');
+      setControlMessage(
+        isZh
+          ? `正在执行 ${elementId} ${action}...`
+          : `Running ${action} for ${elementId}...`
+      );
+
+      try {
+        const response = await fetch(
+          `/api/control/network-elements/${encodeURIComponent(elementId)}/${encodeURIComponent(action)}`,
+          { method: 'POST' }
+        );
+        const payload = await parseOptionalJson<{
+          success?: boolean;
+          message?: string;
+          result?: NetworkElementControlResult;
+          elements?: NetworkElementControlModel[];
+          dashboard?: DashboardMockData;
+          detail?: string | { error?: string; detail?: string; exitCode?: number };
+        }>(response);
+
+        if (!response.ok) {
+          const detail = payload?.detail;
+          const errorMessage =
+            (typeof detail === 'string' ? detail : detail?.error || detail?.detail) ||
+            payload?.message ||
+            `Element control failed with HTTP ${response.status}.`;
+          throw new Error(errorMessage);
+        }
+
+        const returnedElements = payload?.elements;
+        if (Array.isArray(returnedElements)) {
+          setNetworkElementControls(returnedElements);
+        } else {
+          void fetchNetworkElementControls();
+        }
+        if (payload?.dashboard) {
+          applySnapshot(payload.dashboard);
+        }
+        if (payload?.result) {
+          setNetworkElementLastResult(payload.result);
+        }
+        void fetchBackendLogs();
+        void fetchNetworkElementLogs();
+
+        setNetworkElementBusyKey(null);
+        setControlTone(payload?.success === false ? 'error' : 'success');
+        setControlMessage(
+          payload?.message ||
+            (payload?.success === false
+              ? isZh
+                ? '网络元素控制命令执行完成，但有失败。'
+                : 'Network element control command completed with failures.'
+              : isZh
+                ? '网络元素控制命令执行完成。'
+                : 'Network element control command completed.')
+        );
+      } catch (error) {
+        console.error('Failed to control network element:', error);
+        setNetworkElementBusyKey(null);
+        setNetworkElementLastResult({
+          elementId,
+          elementName: elementId,
+          action,
+          exitCode: -1,
+          stderr:
+            error instanceof Error
+              ? error.message
+              : isZh
+                ? '网络元素控制命令失败。'
+                : 'Network element control command failed.'
+        });
+        setControlTone('error');
+        setControlMessage(
+          error instanceof Error
+            ? error.message
+            : isZh
+              ? '网络元素控制命令失败。'
+              : 'Network element control command failed.'
+        );
+      }
+    },
+    [applySnapshot, fetchBackendLogs, fetchNetworkElementControls, fetchNetworkElementLogs, isZh]
+  );
+
   const agentSummary = useMemo(() => {
     const agents = dashboardData.topology.agents;
 
@@ -571,145 +742,109 @@ const App = () => {
     }
   }, []);
 
-  const handleRunTopologyTestFlow = useCallback(async () => {
-    setTopologyTestBusy(true);
-    setTopologyTestPaused(false);
-    setTopologyTestMessage(isZh ? '正在注入拓扑测试消息...' : 'Injecting topology test messages...');
-
-    try {
-      const response = await fetch('/api/control/test-messages/topology-demo', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          rounds: 1,
-          step_delay_seconds: Number((1.2 / topologyTestSpeed).toFixed(3))
-        })
-      });
-      const payload = (await response.json()) as {
-        message?: string;
-        dashboard?: DashboardMockData;
-        tasks?: ControlTask[];
-        detail?: string;
-      };
-
-      if (!response.ok) {
-        throw new Error(payload.detail || `Topology test failed with HTTP ${response.status}.`);
-      }
-
-      if (payload.dashboard) {
-        applySnapshot(payload.dashboard);
-      }
-
-      setTopologyTestBusy(false);
-      setTopologyTestPaused(false);
-      setTopologyTestMessage(
-        payload.message || (isZh ? '拓扑测试消息已注入。' : 'Topology test messages injected.')
-      );
-    } catch (error) {
-      console.error('Failed to run topology test flow:', error);
-      setTopologyTestBusy(false);
-      setTopologyTestPaused(false);
-      setTopologyTestMessage(
-        error instanceof Error
-          ? error.message
-          : isZh
-            ? '拓扑测试消息注入失败。'
-            : 'Failed to inject topology test messages.'
-      );
-    }
-  }, [applySnapshot, isZh, topologyTestSpeed]);
-
-  const handleToggleTopologyTestPause = useCallback(async () => {
-    const nextPaused = !topologyTestPaused;
-
-    try {
-      const response = await fetch(
-        nextPaused
-          ? '/api/control/test-messages/topology-demo/pause'
-          : '/api/control/test-messages/topology-demo/resume',
-        { method: 'POST' }
-      );
-      const payload = (await response.json()) as {
-        success?: boolean;
-        running?: boolean;
-        paused?: boolean;
-        message?: string;
-      };
-
-      setTopologyTestPaused(Boolean(payload.paused));
-      if (!payload.running) {
-        setTopologyTestBusy(false);
-      }
-      if (payload.message) {
-        setTopologyTestMessage(payload.message);
-      }
-    } catch (error) {
-      console.error('Failed to toggle topology test pause:', error);
-      setTopologyTestMessage(
-        error instanceof Error
-          ? error.message
-          : isZh
-            ? '测试流暂停失败。'
-            : 'Failed to pause the test flow.'
-      );
-    }
-  }, [isZh, topologyTestPaused]);
-
-  const handleRunFullDemo = useCallback(async (stages: DemoStage[]) => {
-    setDemoConfigStages(stages);
+  const handleRunConfiguredDemo = useCallback(async (config: {
+    stages: DemoStage[];
+    includeTopologyTest: boolean;
+    testFlowSpeed: number;
+  }) => {
+    setDemoConfigStages(config.stages);
+    setDemoIncludeTopologyTest(config.includeTopologyTest);
+    setTopologyTestSpeed(config.testFlowSpeed);
     setFullDemoBusy(true);
     setFullDemoMessage(copy.demoAction.running);
+    const timing = buildDemoTiming(config.testFlowSpeed);
 
     try {
-      const response = await fetch('/api/control/test-messages/full-demo', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          rounds: 1,
-          step_delay_seconds: 0.22,
-          stages
-        })
-      });
-      const payload = (await response.json()) as {
-        message?: string;
-        dashboard?: DashboardMockData;
-        tasks?: ControlTask[];
-        detail?: string;
-      };
+      let message = '';
 
-      if (!response.ok) {
-        throw new Error(payload.detail || `Full demo failed with HTTP ${response.status}.`);
+      if (config.stages.length > 0) {
+        const response = await fetch('/api/control/test-messages/full-demo', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            rounds: 1,
+            step_delay_seconds: timing.fullDemoDelaySeconds,
+            display_ttl_seconds: timing.displayTtlSeconds,
+            display_active_seconds: timing.displayActiveSeconds,
+            stages: config.stages
+          })
+        });
+        const payload = (await response.json()) as {
+          message?: string;
+          dashboard?: DashboardMockData;
+          tasks?: ControlTask[];
+          detail?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.detail || `Full demo failed with HTTP ${response.status}.`);
+        }
+
+        if (payload.dashboard) {
+          applySnapshot(payload.dashboard);
+        }
+        if (Array.isArray(payload.tasks)) {
+          setControlTasks(payload.tasks);
+          setControlTasksError(null);
+          setControlTasksLoading(false);
+        }
+        message = payload.message || copy.demoAction.success;
       }
 
-      if (payload.dashboard) {
-        applySnapshot(payload.dashboard);
+      if (config.includeTopologyTest) {
+        const response = await fetch('/api/control/test-messages/topology-demo', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            rounds: 1,
+            step_delay_seconds: timing.topologyDelaySeconds,
+            display_ttl_seconds: timing.displayTtlSeconds,
+            display_active_seconds: timing.displayActiveSeconds
+          })
+        });
+        const payload = (await response.json()) as {
+          message?: string;
+          dashboard?: DashboardMockData;
+          detail?: string;
+        };
+
+        if (!response.ok) {
+          throw new Error(payload.detail || `Topology test failed with HTTP ${response.status}.`);
+        }
+
+        if (payload.dashboard) {
+          applySnapshot(payload.dashboard);
+        }
+        message = message
+          ? `${message} ${payload.message || ''}`.trim()
+          : payload.message || (isZh ? '拓扑测试消息已注入。' : 'Topology test messages injected.');
       }
-      if (Array.isArray(payload.tasks)) {
-        setControlTasks(payload.tasks);
-        setControlTasksError(null);
-        setControlTasksLoading(false);
-      }
+
       await fetchBackendLogs();
       await fetchNetworkElementLogs();
 
       setFullDemoBusy(false);
-      setFullDemoMessage(payload.message || copy.demoAction.success);
+      setFullDemoMessage(message || copy.demoAction.success);
     } catch (error) {
-      console.error('Failed to run full demo:', error);
+      console.error('Failed to run configured demo:', error);
       setFullDemoBusy(false);
       setFullDemoMessage(
         error instanceof Error ? error.message : copy.demoAction.failed
       );
     }
-  }, [applySnapshot, copy.demoAction.failed, copy.demoAction.running, copy.demoAction.success, fetchBackendLogs, fetchNetworkElementLogs]);
+  }, [applySnapshot, copy.demoAction.failed, copy.demoAction.running, copy.demoAction.success, fetchBackendLogs, fetchNetworkElementLogs, isZh]);
 
   const handleQuickRunDemo = useCallback(() => {
-    void handleRunFullDemo(demoConfigStages);
-  }, [demoConfigStages, handleRunFullDemo]);
+    void handleRunConfiguredDemo({
+      stages: demoConfigStages,
+      includeTopologyTest: demoIncludeTopologyTest,
+      testFlowSpeed: topologyTestSpeed
+    });
+  }, [demoConfigStages, demoIncludeTopologyTest, handleRunConfiguredDemo, topologyTestSpeed]);
 
   const handleWatchVideoTrack = useCallback(
     async (
@@ -804,6 +939,43 @@ const App = () => {
     [fetchVideoTracks, isZh]
   );
 
+  const handleSaveDataSourceConfig = useCallback(
+    async (next: { useExternalDb: boolean; externalDbPath: string }): Promise<void> => {
+      const response = await fetch('/api/settings/data-source', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(next)
+      });
+
+      const payload = (await response.json()) as {
+        config?: DatabaseSourceConfig;
+        dashboard?: DashboardMockData;
+        tasks?: ControlTask[];
+        detail?: string;
+        message?: string;
+      };
+
+      if (!response.ok || !payload.config) {
+        throw new Error(
+          payload.detail ||
+            payload.message ||
+            (isZh ? '数据库来源更新失败。' : 'Failed to update database source.')
+        );
+      }
+
+      setDataSourceConfig(payload.config);
+      applySnapshot(payload.dashboard);
+      if (Array.isArray(payload.tasks)) {
+        setControlTasks(payload.tasks);
+        setControlTasksLoading(false);
+        setControlTasksError(null);
+      }
+    },
+    [applySnapshot, isZh]
+  );
+
   const renderPage = () => {
     switch (activeTab) {
       case 'agents':
@@ -848,6 +1020,10 @@ const App = () => {
             onDispatchTask={handleDispatchTask}
             onReloadSnapshot={handleReloadSnapshot}
             onStopTask={handleStopTask}
+            networkElements={networkElementControls}
+            networkElementBusyKey={networkElementBusyKey}
+            networkElementLastResult={networkElementLastResult}
+            onControlNetworkElement={handleControlNetworkElement}
             websocketConnected={connected}
             apiHealthy={!dataError}
             statusMessage={controlMessage}
@@ -855,7 +1031,7 @@ const App = () => {
           />
         );
       case 'settings':
-        return <SettingsPage language={language} />;
+        return <SettingsPage language={language} dataSourceConfig={dataSourceConfig} />;
       case 'overview':
       default:
         return (
@@ -863,13 +1039,6 @@ const App = () => {
             data={dashboardData}
             language={language}
             onMetricSelect={handleOverviewMetricSelect}
-            testFlowBusy={topologyTestBusy}
-            testFlowPaused={topologyTestPaused}
-            testFlowMessage={topologyTestMessage}
-            testFlowSpeed={topologyTestSpeed}
-            onTestFlowSpeedChange={setTopologyTestSpeed}
-            onToggleTestFlowPause={handleToggleTopologyTestPause}
-            onRunTestFlow={handleRunTopologyTestFlow}
           />
         );
     }
@@ -885,10 +1054,12 @@ const App = () => {
       <div className="relative flex min-h-screen flex-col md:flex-row">
         <SidebarNav
           activeTab={activeTab}
+          dataSourceConfig={dataSourceConfig}
           language={language}
           theme={theme}
           fullDemoBusy={fullDemoBusy}
           fullDemoMessage={fullDemoMessage}
+          onDatabaseSourceSave={handleSaveDataSourceConfig}
           onLanguageChange={setLanguage}
           onOpenDemoConfig={() => setDemoConfigOpen(true)}
           onQuickRunDemo={handleQuickRunDemo}
@@ -944,9 +1115,11 @@ const App = () => {
         open={demoConfigOpen}
         busy={fullDemoBusy}
         initialStages={demoConfigStages}
+        initialIncludeTopologyTest={demoIncludeTopologyTest}
+        initialTestFlowSpeed={topologyTestSpeed}
         language={language}
         onClose={() => setDemoConfigOpen(false)}
-        onSubmit={handleRunFullDemo}
+        onSubmit={handleRunConfiguredDemo}
       />
     </div>
   );

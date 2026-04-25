@@ -1,17 +1,22 @@
 import { NavKey } from '../types';
 import { LanguageMode, shellCopy } from '../i18n';
-import { AgentsIcon, ControlIcon, NetworkIcon, OverviewIcon, SettingsIcon, SignalIcon } from './icons';
+import { AgentsIcon, ControlIcon, NetworkIcon, OverviewIcon, PlayIcon, SettingsIcon, SignalIcon } from './icons';
+import { DatabaseSourceConfig } from '../types';
+import { DatabaseSettingsButton } from './DatabaseSettingsButton';
 import { LanguageSettingsButton } from './LanguageSettingsButton';
 import { ThemeMode, ThemeSettingsButton } from './ThemeSettingsButton';
 
 interface SidebarNavProps {
   activeTab: NavKey;
+  dataSourceConfig: DatabaseSourceConfig | null;
   language: LanguageMode;
   theme: ThemeMode;
   fullDemoBusy: boolean;
   fullDemoMessage: string | null;
+  onDatabaseSourceSave: (next: { useExternalDb: boolean; externalDbPath: string }) => Promise<void>;
   onLanguageChange: (language: LanguageMode) => void;
-  onRunFullDemo: () => Promise<void>;
+  onOpenDemoConfig: () => void;
+  onQuickRunDemo: () => void;
   onSelect: (tab: NavKey) => void;
   onThemeChange: (theme: ThemeMode) => void;
 }
@@ -30,12 +35,15 @@ const navItems: Array<{
 
 export const SidebarNav = ({
   activeTab,
+  dataSourceConfig,
   language,
   theme,
   fullDemoBusy,
   fullDemoMessage,
+  onDatabaseSourceSave,
   onLanguageChange,
-  onRunFullDemo,
+  onOpenDemoConfig,
+  onQuickRunDemo,
   onSelect,
   onThemeChange
 }: SidebarNavProps) => {
@@ -95,9 +103,8 @@ export const SidebarNav = ({
           <button
             type="button"
             onClick={() => {
-              void onRunFullDemo();
+              onOpenDemoConfig();
             }}
-            disabled={fullDemoBusy}
             className={[
               'theme-top-button w-full justify-start px-4 py-3',
               fullDemoBusy ? 'cursor-wait opacity-70' : ''
@@ -118,7 +125,36 @@ export const SidebarNav = ({
             {fullDemoMessage || copy.demoAction.ready}
           </p>
 
+          <div className="mt-4">
+            <button
+              type="button"
+              onClick={onQuickRunDemo}
+              disabled={fullDemoBusy}
+              className={[
+                'theme-top-button w-full justify-start px-4 py-3',
+                fullDemoBusy ? 'cursor-wait opacity-70' : ''
+              ].join(' ')}
+              aria-label={copy.demoAction.quickRunLabel}
+              title={copy.demoAction.quickRunDescription}
+            >
+              <span className="theme-accent-icon flex h-10 w-10 items-center justify-center rounded-2xl">
+                <PlayIcon />
+              </span>
+              <span className="flex min-w-0 flex-col">
+                <span className="text-sm font-medium">{copy.demoAction.quickRunLabel}</span>
+                <span className="theme-muted text-xs">
+                  {fullDemoBusy ? copy.demoAction.running : copy.demoAction.quickRunDescription}
+                </span>
+              </span>
+            </button>
+          </div>
+
           <div className="pt-3 md:flex md:items-center md:gap-3">
+            <DatabaseSettingsButton
+              config={dataSourceConfig}
+              language={language}
+              onSave={onDatabaseSourceSave}
+            />
             <ThemeSettingsButton theme={theme} language={language} onThemeChange={onThemeChange} />
             <LanguageSettingsButton language={language} onLanguageChange={onLanguageChange} />
           </div>

@@ -13,21 +13,15 @@ import '@xyflow/react/dist/style.css';
 import { LanguageMode } from '../i18n';
 import { MessageFlowEdgeModel, MessageFlowNodeModel } from '../types';
 import { FlowMessageEdge } from './FlowMessageEdge';
-import { SignalIcon } from './icons';
 import { NetworkZoneNode, NetworkZoneNodeModel } from './NetworkZoneNode';
 import { SystemFlowNode, SystemFlowNodeModelData } from './SystemFlowNode';
+
+type TopologyFlowNode = SystemFlowNodeModelData | NetworkZoneNodeModel;
 
 interface TopologyMapProps {
   nodes: MessageFlowNodeModel[];
   edges: MessageFlowEdgeModel[];
   language: LanguageMode;
-  testFlowBusy: boolean;
-  testFlowPaused: boolean;
-  testFlowMessage: string | null;
-  testFlowSpeed: number;
-  onTestFlowSpeedChange: (speed: number) => void;
-  onToggleTestFlowPause: () => Promise<void>;
-  onRunTestFlow: () => Promise<void>;
 }
 
 const nodeTypes = {
@@ -39,32 +33,76 @@ const edgeTypes: EdgeTypes = {
   flowMessage: FlowMessageEdge
 };
 const NETWORK_ZONE_NODE_ID = '__network-zone__';
+const AGENT_GW_ZONE_NODE_ID = '__agent-gw-zone__';
 
 const triangleLayout: Record<string, { x: number; y: number }> = {
   'ACN Agent': { x: -280, y: 300 },
   IDM: { x: 260, y: 80 },
+  ARF: { x: 820, y: 120 },
+  ACF: { x: 820, y: 300 },
+  Relay: { x: 820, y: 480 },
   AgentGW: { x: 820, y: 300 },
-  'ACN SDK': { x: 260, y: 590 }
+  'ACN SDK': { x: 260, y: 610 }
+};
+
+const gatewayNodes = new Set(['ARF', 'ACF', 'Relay', 'AgentGW']);
+const gatewayBundleOffsets: Record<string, number> = {
+  ARF: -35,
+  ACF: 0,
+  Relay: 35,
+  AgentGW: 0
+};
+const gatewayCurvatures: Record<string, number> = {
+  ARF: 0.15,
+  ACF: 0.18,
+  Relay: 0.21,
+  AgentGW: 0.18
+};
+
+const resolveGatewayLaneHandle = (name: string, side: 'left' | 'right') => {
+  const prefix = side === 'left' ? 'left' : 'right';
+
+  if (name === 'ARF') {
+    return `${prefix}-top-out`;
+  }
+
+  if (name === 'Relay') {
+    return `${prefix}-bottom-out`;
+  }
+
+  return `${prefix}-mid-out`;
 };
 
 const resolveHandles = (
   source: string,
   target: string
 ): Pick<Edge, 'sourceHandle' | 'targetHandle'> => {
-  if (source === 'ACN Agent' && target === 'AgentGW') {
-    return { sourceHandle: 'right-mid-out', targetHandle: 'left-mid-in' };
+  if (source === 'ACN Agent' && gatewayNodes.has(target)) {
+    return {
+      sourceHandle: resolveGatewayLaneHandle(target, 'right'),
+      targetHandle: 'left-mid-in'
+    };
   }
 
-  if (source === 'AgentGW' && target === 'ACN Agent') {
-    return { sourceHandle: 'bottom-out', targetHandle: 'bottom-in' };
+  if (gatewayNodes.has(source) && target === 'ACN Agent') {
+    return {
+      sourceHandle: 'bottom-out',
+      targetHandle: 'bottom-in'
+    };
   }
 
-  if (source === 'AgentGW' && target === 'IDM') {
-    return { sourceHandle: 'top-out', targetHandle: 'right-in' };
+  if (gatewayNodes.has(source) && target === 'IDM') {
+    return {
+      sourceHandle: 'top-out',
+      targetHandle: 'right-in'
+    };
   }
 
-  if (source === 'IDM' && target === 'AgentGW') {
-    return { sourceHandle: 'right-out', targetHandle: 'top-in' };
+  if (source === 'IDM' && gatewayNodes.has(target)) {
+    return {
+      sourceHandle: resolveGatewayLaneHandle(target, 'right'),
+      targetHandle: 'top-in'
+    };
   }
 
   if (source === 'ACN Agent' && target === 'IDM') {
@@ -75,11 +113,14 @@ const resolveHandles = (
     return { sourceHandle: 'left-out', targetHandle: 'right-in' };
   }
 
-  if (source === 'AgentGW' && target === 'ACN SDK') {
-    return { sourceHandle: 'left-out', targetHandle: 'right-in' };
+  if (gatewayNodes.has(source) && target === 'ACN SDK') {
+    return {
+      sourceHandle: resolveGatewayLaneHandle(source, 'left'),
+      targetHandle: 'right-in'
+    };
   }
 
-  if (source === 'ACN SDK' && target === 'AgentGW') {
+  if (source === 'ACN SDK' && gatewayNodes.has(target)) {
     return { sourceHandle: 'right-out', targetHandle: 'left-in' };
   }
 
@@ -114,13 +155,14 @@ const resolveEdgePresentation = (source: string, target: string) => {
       };
     }
 
-    if (target === 'AgentGW') {
+    if (gatewayNodes.has(target)) {
       return {
         bubbleAnchor: 'source',
         bubbleTail: 'bottom',
         bubbleOffsetX: -50,
         bubbleOffsetY: -40,
-        curvature: 0.18
+        curvature: gatewayCurvatures[target] ?? 0.18,
+        bundleOffset: gatewayBundleOffsets[target] ?? 0
       };
     }
 
@@ -136,7 +178,7 @@ const resolveEdgePresentation = (source: string, target: string) => {
     };
   }
 
-  if (source === 'AgentGW') {
+  if (gatewayNodes.has(source)) {
     const verticalOffsets: Record<string, number> = {
       IDM: -72,
       'ACN Agent': 0,
@@ -147,7 +189,8 @@ const resolveEdgePresentation = (source: string, target: string) => {
       bubbleAnchor: 'source',
       bubbleTail: 'left',
       bubbleOffsetY: verticalOffsets[target] ?? 0,
-      curvature: 0.18
+      curvature: gatewayCurvatures[source] ?? 0.18,
+      bundleOffset: gatewayBundleOffsets[source] ?? 0
     };
   }
 
@@ -155,6 +198,9 @@ const resolveEdgePresentation = (source: string, target: string) => {
     const horizontalOffsets: Record<string, number> = {
       'ACN Agent': -124,
       'ACN SDK': 0,
+      ARF: 124,
+      ACF: 124,
+      Relay: 124,
       AgentGW: 124
     };
 
@@ -162,7 +208,8 @@ const resolveEdgePresentation = (source: string, target: string) => {
       bubbleAnchor: 'source',
       bubbleTail: 'bottom',
       bubbleOffsetX: horizontalOffsets[target] ?? 0,
-      curvature: target === 'ACN SDK' ? 0.03 : 0.18
+      curvature: target === 'ACN SDK' ? 0.03 : gatewayCurvatures[target] ?? 0.18,
+      bundleOffset: gatewayBundleOffsets[target] ?? 0
     };
   }
 
@@ -170,6 +217,9 @@ const resolveEdgePresentation = (source: string, target: string) => {
     const horizontalOffsets: Record<string, number> = {
       'ACN Agent': -124,
       IDM: 0,
+      ARF: 124,
+      ACF: 124,
+      Relay: 124,
       AgentGW: 124
     };
 
@@ -177,7 +227,8 @@ const resolveEdgePresentation = (source: string, target: string) => {
       bubbleAnchor: 'source',
       bubbleTail: 'top',
       bubbleOffsetX: horizontalOffsets[target] ?? 0,
-      curvature: target === 'IDM' ? 0.06 : 0.18
+      curvature: target === 'IDM' ? 0.06 : gatewayCurvatures[target] ?? 0.18,
+      bundleOffset: gatewayBundleOffsets[target] ?? 0
     };
   }
 
@@ -187,34 +238,47 @@ const resolveEdgePresentation = (source: string, target: string) => {
 export const TopologyMap = ({
   nodes,
   edges,
-  language,
-  testFlowBusy,
-  testFlowPaused,
-  testFlowMessage,
-  testFlowSpeed,
-  onTestFlowSpeedChange,
-  onToggleTestFlowPause,
-  onRunTestFlow
+  language
 }: TopologyMapProps) => {
-  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance | null>(null);
-  const [interactive, setInteractive] = useState(true);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<TopologyFlowNode, Edge> | null>(null);
+  const [interactive, setInteractive] = useState(false);
   const [displayNodes, setDisplayNodes] = useState<MessageFlowNodeModel[]>(nodes);
   const [displayEdges, setDisplayEdges] = useState<MessageFlowEdgeModel[]>(edges);
   const isZh = language === 'zh';
 
   useEffect(() => {
-    if (!testFlowPaused) {
-      setDisplayNodes(nodes);
-      setDisplayEdges(edges);
-    }
-  }, [edges, nodes, testFlowPaused]);
+    setDisplayNodes(nodes);
+    setDisplayEdges(edges);
+  }, [edges, nodes]);
 
-  const flowNodes = useMemo<Array<SystemFlowNodeModelData | NetworkZoneNodeModel>>(
+  const activeNodeRoles = useMemo(() => {
+    const roleMap = new Map<string, 'source' | 'target' | 'both'>();
+
+    displayEdges
+      .filter((edge) => edge.active)
+      .forEach((edge) => {
+        const currentSource = roleMap.get(edge.source);
+        roleMap.set(
+          edge.source,
+          currentSource === 'target' || currentSource === 'both' ? 'both' : 'source'
+        );
+
+        const currentTarget = roleMap.get(edge.target);
+        roleMap.set(
+          edge.target,
+          currentTarget === 'source' || currentTarget === 'both' ? 'both' : 'target'
+        );
+      });
+
+    return roleMap;
+  }, [displayEdges]);
+
+  const flowNodes = useMemo<TopologyFlowNode[]>(
     () => {
       const zoneNode: NetworkZoneNodeModel = {
         id: NETWORK_ZONE_NODE_ID,
         type: 'networkZone',
-        position: { x: -360, y: 20 },
+        position: { x: -350, y: 30 },
         draggable: false,
         selectable: false,
         focusable: false,
@@ -222,8 +286,24 @@ export const TopologyMap = ({
           label: isZh ? '网络区域' : 'In-Network Zone'
         },
         style: {
-          width: 1460,
-          height: 500
+          width: 1500,
+          height: 760
+        }
+      };
+      const agentGatewayZoneNode: NetworkZoneNodeModel = {
+        id: AGENT_GW_ZONE_NODE_ID,
+        type: 'networkZone',
+        position: { x: 780, y: 62 },
+        draggable: false,
+        selectable: false,
+        focusable: false,
+        data: {
+          label: 'AgentGW',
+          variant: 'gateway'
+        },
+        style: {
+          width: 300,
+          height: 630
         }
       };
 
@@ -231,12 +311,16 @@ export const TopologyMap = ({
         id: node.id,
         type: 'systemFlow' as const,
         position: triangleLayout[node.name] ?? node.position,
-        data: { ...node } as SystemFlowNodeModelData['data']
+        data: {
+          ...node,
+          compact: ['ARF', 'ACF', 'Relay'].includes(node.name),
+          highlightRole: activeNodeRoles.get(node.id) ?? null
+        } as SystemFlowNodeModelData['data']
       }));
 
-      return [zoneNode, ...systemNodes];
+      return [zoneNode, agentGatewayZoneNode, ...systemNodes];
     },
-    [displayNodes, isZh]
+    [activeNodeRoles, displayNodes, isZh]
   );
 
   const flowEdges = useMemo<Edge[]>(
@@ -247,7 +331,7 @@ export const TopologyMap = ({
         target: edge.target,
         type: 'flowMessage',
         ...resolveHandles(edge.source, edge.target),
-        animated: edge.active && !testFlowPaused,
+        animated: edge.active,
         data: {
           routeLabel: `${edge.source} → ${edge.target}`,
           messageLabel: edge.lastMessage,
@@ -255,23 +339,28 @@ export const TopologyMap = ({
           active: edge.active,
           ...resolveEdgePresentation(edge.source, edge.target)
         },
+        zIndex: edge.active ? 20 : 5,
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          width: 22,
-          height: 22,
-          color: edge.active ? '#0891b2' : '#dc2626'
+          width: edge.active ? 22 : 18,
+          height: edge.active ? 22 : 18,
+          color: edge.active ? '#06b6d4' : '#ef4444'
         },
         style: {
-          strokeWidth: edge.active ? 3 : 2.4,
+          strokeWidth: edge.active ? 3.6 : 2.2,
           strokeLinecap: 'round',
-          stroke: edge.active ? '#0891b2' : '#dc2626'
+          stroke: edge.active ? '#06b6d4' : '#ef4444',
+          opacity: edge.active ? 0.98 : 0.4,
+          filter: edge.active
+            ? 'drop-shadow(0 0 8px rgba(34, 211, 238, 0.2))'
+            : 'drop-shadow(0 0 2px rgba(15, 23, 42, 0.08))'
         }
       })),
-    [displayEdges, isZh, testFlowPaused]
+    [displayEdges, isZh]
   );
 
   useEffect(() => {
-    if (!flowInstance || flowNodes.length === 0 || testFlowPaused) {
+    if (!flowInstance || flowNodes.length === 0) {
       return;
     }
 
@@ -283,7 +372,7 @@ export const TopologyMap = ({
     });
 
     return () => window.cancelAnimationFrame(frameId);
-  }, [flowEdges.length, flowInstance, flowNodes.length, testFlowPaused]);
+  }, [flowEdges.length, flowInstance, flowNodes.length]);
 
   return (
     <section className="glass-panel overflow-hidden">
@@ -293,59 +382,11 @@ export const TopologyMap = ({
           <h2 className="theme-title mt-2 text-2xl font-semibold">{isZh ? 'React Flow 消息路径' : 'React Flow Message Paths'}</h2>
           <p className="theme-soft mt-1 text-sm">
             {isZh
-              ? '将最近收到的 pipeline 日志聚合为 ACN Agent、AgentGW、IDM 与 ACN SDK 之间的实时消息路径。'
-              : 'Recent pipeline logs are aggregated into live paths between ACN Agent, AgentGW, IDM, and ACN SDK.'}
+              ? '将最近收到的 pipeline 日志聚合为 ACN Agent、ARF、ACF、Relay、IDM 与 ACN SDK 之间的实时消息路径。'
+              : 'Recent pipeline logs are aggregated into live paths between ACN Agent, ARF, ACF, Relay, IDM, and ACN SDK.'}
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-xs font-medium">
-          <label className="theme-top-button cursor-default px-4 py-2 text-xs font-semibold">
-            <span className="theme-muted">
-              {isZh ? '测试速度' : 'Test Speed'}
-            </span>
-            <select
-              value={testFlowSpeed}
-              onChange={(event) => onTestFlowSpeedChange(Number(event.target.value))}
-              disabled={testFlowBusy}
-              className="ml-2 rounded-xl border border-[color:var(--border-soft)] bg-[color:var(--surface-strong)] px-2 py-1 text-xs text-[color:var(--text-main)] outline-none"
-            >
-              {[0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => (
-                <option key={speed} value={speed}>
-                  {speed.toFixed(speed < 1 ? 2 : speed % 1 === 0 ? 1 : 2)}x
-                </option>
-              ))}
-            </select>
-          </label>
-          <button
-            type="button"
-            onClick={() => {
-              void onToggleTestFlowPause();
-            }}
-            disabled={!testFlowBusy}
-            className={[
-              'theme-top-button px-4 py-2 text-xs font-semibold',
-              !testFlowBusy ? 'cursor-not-allowed opacity-50' : ''
-            ].join(' ')}
-          >
-            {testFlowPaused
-              ? (isZh ? '继续测试流' : 'Resume Flow')
-              : (isZh ? '暂停测试流' : 'Pause Flow')}
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              void onRunTestFlow();
-            }}
-            disabled={testFlowBusy}
-            className={[
-              'theme-top-button px-4 py-2 text-xs font-semibold',
-              testFlowBusy ? 'cursor-wait opacity-70' : ''
-            ].join(' ')}
-          >
-            <span className="theme-accent-icon flex h-8 w-8 items-center justify-center rounded-2xl">
-              <SignalIcon className="h-4 w-4" />
-            </span>
-            {testFlowBusy ? (isZh ? '注入中...' : 'Injecting...') : (isZh ? '运行测试流' : 'Run Test Flow')}
-          </button>
           <span className="theme-badge-cyan rounded-full border px-3 py-1">
             {isZh ? `${edges.filter((edge) => edge.active).length} 条活动路径` : `${edges.filter((edge) => edge.active).length} active routes`}
           </span>
@@ -354,18 +395,6 @@ export const TopologyMap = ({
           </span>
         </div>
       </header>
-
-      {testFlowMessage ? (
-        <div className="border-b border-[color:var(--border-soft)] px-6 py-3">
-          <div className="flex flex-wrap gap-2">
-            {testFlowMessage ? (
-              <span className="theme-chip inline-flex rounded-full px-3 py-1 text-xs font-medium">
-                {testFlowMessage}
-              </span>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
 
       <div className="rf-theme theme-topology-canvas w-full">
         <ReactFlow
@@ -376,7 +405,15 @@ export const TopologyMap = ({
           className="h-full w-full"
           fitView
           fitViewOptions={{ padding: 0.24 }}
-          onInit={setFlowInstance}
+          onInit={(instance) => {
+            setFlowInstance(instance);
+            window.requestAnimationFrame(() => {
+              instance.fitView({
+                duration: 0,
+                padding: 0.24
+              });
+            });
+          }}
           nodesDraggable={false}
           nodesConnectable={false}
           elementsSelectable={interactive}
@@ -387,7 +424,7 @@ export const TopologyMap = ({
           minZoom={0.45}
           maxZoom={1.35}
           proOptions={{ hideAttribution: true }}
-          defaultEdgeOptions={{ type: 'flowMessage' }}
+        defaultEdgeOptions={{ type: 'flowMessage' }}
         >
           <Controls
             className="theme-rf-panel !overflow-hidden !rounded-2xl !border !shadow-panel"

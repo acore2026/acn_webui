@@ -8,14 +8,17 @@ Port: 9005
 import asyncio
 import base64
 import json
+import secrets
 import socket
 import sqlite3
 import re
+import tempfile
+import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, Response, StreamingResponse
@@ -24,6 +27,8 @@ import uvicorn
 from typing import List, Dict, Any, Optional
 import httpx
 from PIL import Image, ImageDraw
+from cryptography import x509
+from cryptography.x509.oid import NameOID
 
 # Import video stream manager
 from .video_stream import video_stream_manager, StreamStatus
@@ -38,8 +43,16 @@ except ImportError as e:
     print(f"[Warning] MOQ video subscriber not available: {e}")
     MOQ_AVAILABLE = False
 
-# Database path
-DB_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
+# Database paths and source settings
+ROOT_DIR = Path(__file__).resolve().parents[2]
+EXTERNAL_DB_DEFAULT_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
+LOCAL_CACHE_DB_PATH = ROOT_DIR / "logs" / "webui_local_state.db"
+DATA_SOURCE_SETTINGS_PATH = ROOT_DIR / "logs" / "data_source_settings.json"
+DIRECT_DEMO_SETTINGS_PATH = ROOT_DIR / "logs" / "direct_demo_settings.json"
+CERT_DB_PATH = ROOT_DIR / "logs" / "certificates.db"
+CERT_STORAGE_DIR = ROOT_DIR / "logs" / "cert_store"
+IDM_CERT_UPLOAD_URL = "http://127.0.0.1:9020/idm/v1/cert-upload"
+IDM_CERT_DELETE_URL = "http://127.0.0.1:9020/idm/v1/cert-delete"
 # DB_PATH = "/root/lpx/webui/test/test_agent_gw.db"
 
 # ARF Service Configuration
@@ -104,15 +117,43 @@ ELEMENT_PORTS = [
     },
 ]
 
+NETWORK_ELEMENT_CONTROL_SCRIPTS = {
+    "acn-agent": {
+        "id": "acn-agent",
+        "name": "ACN Agent",
+        "script": Path("/home/acn/cxr/acn_agent/start_acn_agent.sh"),
+        "description": "Controls the ACN Agent execution runtime.",
+    },
+    "agent-gw": {
+        "id": "agent-gw",
+        "name": "AgentGW",
+        "script": Path("/home/acn/zqm/acn_gw/start_agent_gw.sh"),
+        "description": "Controls ARF, ACF, and Relay services in AgentGW.",
+    },
+    "idm": {
+        "id": "idm",
+        "name": "IDM",
+        "script": Path("/home/acn/cx/idm/start_idm.sh"),
+        "description": "Controls the IDM identity verification service.",
+    },
+}
+NETWORK_ELEMENT_CONTROL_ACTIONS = {"start", "stop", "restart"}
+
 FLOW_NODE_LAYOUTS = {
-    "ACN Agent": {"x": 100, "y": 210},
-    "IDM": {"x": 510, "y": 60},
-    "AgentGW": {"x": 920, "y": 210},
-    "ACN SDK": {"x": 510, "y": 360},
+    "ACN Agent": {"x": -260, "y": 300},
+    "IDM": {"x": 250, "y": 70},
+    "ARF": {"x": 760, "y": 130},
+    "ACF": {"x": 760, "y": 300},
+    "Relay": {"x": 760, "y": 470},
+    "ACN SDK": {"x": 250, "y": 610},
 }
 
 MESSAGE_FLOW_TTL_SECONDS = 1
 MESSAGE_FLOW_ACTIVE_SECONDS = 1
+message_flow_display_runtime = {
+    "ttl_seconds": float(MESSAGE_FLOW_TTL_SECONDS),
+    "active_seconds": float(MESSAGE_FLOW_ACTIVE_SECONDS),
+}
 
 NETWORK_ELEMENT_LOG_SOURCES = [
     {
@@ -134,6 +175,924 @@ NETWORK_ELEMENT_LOG_SOURCES = [
         "path": IDM_LOG_DIR,
     },
 ]
+
+DATA_SOURCE_SETTINGS_LOCK = threading.Lock()
+DIRECT_DEMO_SETTINGS_LOCK = threading.Lock()
+DEFAULT_DATA_SOURCE_SETTINGS = {
+    "useExternalDb": True,
+    "externalDbPath": EXTERNAL_DB_DEFAULT_PATH,
+}
+DEFAULT_DIRECT_DEMO_SETTINGS = {
+    "enabled": True,
+}
+
+
+def _ensure_runtime_dirs() -> None:
+    LOCAL_CACHE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DATA_SOURCE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DIRECT_DEMO_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CERT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CERT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _load_data_source_settings() -> Dict[str, Any]:
+    _ensure_runtime_dirs()
+    if not DATA_SOURCE_SETTINGS_PATH.exists():
+        return dict(DEFAULT_DATA_SOURCE_SETTINGS)
+
+    try:
+        raw = json.loads(DATA_SOURCE_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_DATA_SOURCE_SETTINGS)
+
+    settings = dict(DEFAULT_DATA_SOURCE_SETTINGS)
+    if isinstance(raw, dict):
+        settings["useExternalDb"] = bool(raw.get("useExternalDb", settings["useExternalDb"]))
+        external_path = str(raw.get("externalDbPath") or settings["externalDbPath"]).strip()
+        settings["externalDbPath"] = external_path or EXTERNAL_DB_DEFAULT_PATH
+    return settings
+
+
+def _save_data_source_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {
+        "useExternalDb": bool(settings.get("useExternalDb", True)),
+        "externalDbPath": str(settings.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH).strip()
+        or EXTERNAL_DB_DEFAULT_PATH,
+    }
+    _ensure_runtime_dirs()
+    with DATA_SOURCE_SETTINGS_LOCK:
+        DATA_SOURCE_SETTINGS_PATH.write_text(
+            json.dumps(normalized, indent=2, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+    return normalized
+
+
+def _load_direct_demo_settings() -> Dict[str, Any]:
+    _ensure_runtime_dirs()
+    if not DIRECT_DEMO_SETTINGS_PATH.exists():
+        return dict(DEFAULT_DIRECT_DEMO_SETTINGS)
+
+    try:
+        raw = json.loads(DIRECT_DEMO_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return dict(DEFAULT_DIRECT_DEMO_SETTINGS)
+
+    settings = dict(DEFAULT_DIRECT_DEMO_SETTINGS)
+    if isinstance(raw, dict):
+        settings["enabled"] = bool(raw.get("enabled", settings["enabled"]))
+    return settings
+
+
+def _save_direct_demo_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = {
+        "enabled": bool(settings.get("enabled", True)),
+    }
+    _ensure_runtime_dirs()
+    with DIRECT_DEMO_SETTINGS_LOCK:
+        DIRECT_DEMO_SETTINGS_PATH.write_text(
+            json.dumps(normalized, indent=2, ensure_ascii=True) + "\n",
+            encoding="utf-8",
+        )
+    return normalized
+
+
+data_source_settings: Dict[str, Any] = _load_data_source_settings()
+direct_demo_settings: Dict[str, Any] = _load_direct_demo_settings()
+
+
+def get_data_source_settings() -> Dict[str, Any]:
+    return dict(data_source_settings)
+
+
+def get_direct_demo_settings() -> Dict[str, Any]:
+    return dict(direct_demo_settings)
+
+
+def get_external_db_path() -> str:
+    return str(data_source_settings.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH)
+
+
+def should_use_external_db() -> bool:
+    return bool(data_source_settings.get("useExternalDb", True))
+
+
+def get_local_cache_db_path() -> str:
+    return str(LOCAL_CACHE_DB_PATH)
+
+
+def ensure_local_cache_db() -> None:
+    _ensure_runtime_dirs()
+    conn = sqlite3.connect(LOCAL_CACHE_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS agents (
+                agent_id TEXT PRIMARY KEY,
+                agent_name TEXT,
+                agent_capability TEXT DEFAULT '[]',
+                agent_status TEXT DEFAULT 'offline',
+                work_status TEXT DEFAULT 'idle',
+                current_task TEXT DEFAULT '',
+                last_update TEXT,
+                launch_time TEXT,
+                offline_time TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        for column_name in ("launch_time", "offline_time"):
+            try:
+                cursor.execute(f"ALTER TABLE agents ADD COLUMN {column_name} TEXT")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tasks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                task_description TEXT DEFAULT '',
+                task_name TEXT DEFAULT '',
+                task_type TEXT DEFAULT '',
+                status TEXT DEFAULT 'processing',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(agent_id, task_id)
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ingested_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                source_kind TEXT NOT NULL,
+                source_name TEXT,
+                agent_id TEXT,
+                task_id TEXT,
+                summary TEXT,
+                payload_json TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_task_id ON tasks(task_id)"
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _connect_external_db_readonly(path: str) -> sqlite3.Connection:
+    normalized = str(path or "").strip()
+    if not normalized:
+        raise FileNotFoundError("External database path is empty")
+    if not Path(normalized).exists():
+        raise FileNotFoundError(f"External database does not exist: {normalized}")
+    conn = sqlite3.connect(f"file:{normalized}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_external_db_writable(path: str) -> sqlite3.Connection:
+    normalized = str(path or "").strip()
+    if not normalized:
+        raise FileNotFoundError("External database path is empty")
+    parent = Path(normalized).expanduser().resolve().parent
+    if not parent.exists():
+        raise FileNotFoundError(f"External database directory does not exist: {parent}")
+    conn = sqlite3.connect(normalized)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _connect_local_cache_db() -> sqlite3.Connection:
+    ensure_local_cache_db()
+    conn = sqlite3.connect(LOCAL_CACHE_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ensure_cert_db() -> None:
+    _ensure_runtime_dirs()
+    conn = sqlite3.connect(CERT_DB_PATH)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS certificates (
+                cert_id TEXT PRIMARY KEY,
+                cert_name TEXT NOT NULL,
+                authority TEXT NOT NULL,
+                validity TEXT NOT NULL,
+                stored_path TEXT NOT NULL,
+                uploaded_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _connect_cert_db() -> sqlite3.Connection:
+    ensure_cert_db()
+    conn = sqlite3.connect(CERT_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _list_certificates() -> List[Dict[str, Any]]:
+    conn = _connect_cert_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT cert_id, cert_name, authority, validity, uploaded_at
+            FROM certificates
+            ORDER BY uploaded_at DESC, cert_name ASC
+            """
+        )
+        rows = cursor.fetchall()
+        return [
+            {
+                "certID": row["cert_id"],
+                "certName": row["cert_name"],
+                "authority": row["authority"],
+                "validity": row["validity"],
+                "uploadedAt": row["uploaded_at"],
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def _generate_cert_id() -> str:
+    ensure_cert_db()
+    conn = _connect_cert_db()
+    try:
+        cursor = conn.cursor()
+        while True:
+            cert_id = f"cert-{secrets.randbelow(100000000):08d}"
+            cursor.execute(
+                "SELECT 1 FROM certificates WHERE cert_id = ? LIMIT 1",
+                (cert_id,),
+            )
+            if cursor.fetchone() is None:
+                return cert_id
+    finally:
+        conn.close()
+
+
+def _decode_x509_certificate(cert_bytes: bytes) -> Dict[str, str]:
+    try:
+        certificate = x509.load_pem_x509_certificate(cert_bytes)
+    except ValueError:
+        certificate = x509.load_der_x509_certificate(cert_bytes)
+
+    common_names = certificate.issuer.get_attributes_for_oid(NameOID.COMMON_NAME)
+    authority = (
+        str(common_names[0].value).strip()
+        if common_names and str(common_names[0].value).strip()
+        else certificate.issuer.rfc4514_string()
+    )
+
+    not_valid_before = getattr(certificate, "not_valid_before_utc", None) or certificate.not_valid_before
+    not_valid_after = getattr(certificate, "not_valid_after_utc", None) or certificate.not_valid_after
+    validity = f"{not_valid_before.strftime('%Y-%m-%d')} to {not_valid_after.strftime('%Y-%m-%d')}"
+    return {"authority": authority, "validity": validity}
+
+
+async def _read_certificate_upload(
+    file: Optional[UploadFile], file_path: Optional[str]
+) -> Dict[str, Any]:
+    normalized_path = str(file_path or "").strip()
+    if file is not None and file.filename:
+        cert_name = Path(file.filename).name
+        cert_bytes = await file.read()
+        if not cert_bytes:
+            raise HTTPException(status_code=400, detail="Uploaded certificate file is empty.")
+        return {"cert_name": cert_name, "cert_bytes": cert_bytes}
+
+    if normalized_path:
+        source_path = Path(normalized_path).expanduser()
+        if not source_path.exists() or not source_path.is_file():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Certificate file path does not exist: {normalized_path}",
+            )
+        cert_bytes = source_path.read_bytes()
+        if not cert_bytes:
+            raise HTTPException(status_code=400, detail="Certificate file is empty.")
+        return {"cert_name": source_path.name, "cert_bytes": cert_bytes}
+
+    raise HTTPException(
+        status_code=400,
+        detail="Provide a certificate file or a certificate file path.",
+    )
+
+
+async def _forward_certificate_to_idm(
+    cert_id: str, cert_name: str, cert_bytes: bytes
+) -> Dict[str, Any]:
+    add_log_entry(
+        f"[Cert Upload] Sending certificate to IDM: POST /idm/v1/cert-upload certID={cert_id} certName={cert_name}",
+        "info",
+    )
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(
+                IDM_CERT_UPLOAD_URL,
+                data={"certID": cert_id, "certName": cert_name},
+                files={"file": (cert_name, cert_bytes, "application/octet-stream")},
+                timeout=20.0,
+            )
+    except httpx.ConnectError as exc:
+        add_log_entry(
+            f"[Cert Upload] IDM connection failed for certID={cert_id}: {exc}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to IDM certificate upload endpoint: {exc}",
+        ) from exc
+    except Exception as exc:
+        add_log_entry(
+            f"[Cert Upload] IDM request error for certID={cert_id}: {exc}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Certificate upload to IDM failed: {exc}",
+        ) from exc
+
+    add_log_entry(
+        f"[Cert Upload] IDM response for certID={cert_id}: HTTP {response.status_code}",
+        "info" if response.status_code == 200 else "error",
+    )
+    if response.status_code != 200:
+        body = response.text.strip()
+        if body:
+            add_log_entry(
+                f"[Cert Upload] IDM rejected certID={cert_id}: {body}",
+                "error",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=body or f"IDM certificate upload failed with HTTP {response.status_code}. Expected 200 OK.",
+        )
+
+    try:
+        parsed_body: Any = response.json()
+    except ValueError:
+        parsed_body = response.text
+
+    return {
+        "statusCode": response.status_code,
+        "ok": response.status_code == 200,
+        "body": parsed_body,
+    }
+
+
+async def _forward_certificate_delete_to_idm(
+    cert_id: str, cert_name: str
+) -> Dict[str, Any]:
+    payload = {"certID": cert_id, "certName": cert_name}
+    add_log_entry(
+        f"[Cert Delete] Sending delete request to IDM: POST /idm/v1/cert-delete certID={cert_id} certName={cert_name}",
+        "info",
+    )
+    try:
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.post(
+                IDM_CERT_DELETE_URL,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=20.0,
+            )
+    except httpx.ConnectError as exc:
+        add_log_entry(
+            f"[Cert Delete] IDM connection failed for certID={cert_id}: {exc}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot connect to IDM certificate delete endpoint: {exc}",
+        ) from exc
+    except Exception as exc:
+        add_log_entry(
+            f"[Cert Delete] IDM request error for certID={cert_id}: {exc}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Certificate delete request to IDM failed: {exc}",
+        ) from exc
+
+    add_log_entry(
+        f"[Cert Delete] IDM response for certID={cert_id}: HTTP {response.status_code}",
+        "info" if response.status_code == 200 else "error",
+    )
+    if response.status_code != 200:
+        body = response.text.strip()
+        if body:
+            add_log_entry(
+                f"[Cert Delete] IDM rejected certID={cert_id}: {body}",
+                "error",
+            )
+        raise HTTPException(
+            status_code=502,
+            detail=body or f"IDM certificate delete failed with HTTP {response.status_code}. Expected 200 OK.",
+        )
+
+    try:
+        parsed_body: Any = response.json()
+    except ValueError:
+        parsed_body = response.text
+
+    return {
+        "statusCode": response.status_code,
+        "ok": response.status_code == 200,
+        "body": parsed_body,
+    }
+
+
+def _store_certificate_record(
+    cert_id: str,
+    cert_name: str,
+    authority: str,
+    validity: str,
+    cert_bytes: bytes,
+) -> Dict[str, Any]:
+    suffix = Path(cert_name).suffix or ".crt"
+    stored_path = CERT_STORAGE_DIR / f"{cert_id}{suffix}"
+    stored_path.write_bytes(cert_bytes)
+
+    uploaded_at = datetime.utcnow().isoformat()
+    conn = _connect_cert_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO certificates (cert_id, cert_name, authority, validity, stored_path, uploaded_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (cert_id, cert_name, authority, validity, str(stored_path), uploaded_at),
+        )
+        conn.commit()
+    except Exception:
+        if stored_path.exists():
+            stored_path.unlink()
+        raise
+    finally:
+        conn.close()
+
+    return {
+        "certID": cert_id,
+        "certName": cert_name,
+        "authority": authority,
+        "validity": validity,
+        "uploadedAt": uploaded_at,
+    }
+
+
+def _delete_certificate_record(cert_id: str) -> None:
+    normalized_cert_id = str(cert_id or "").strip()
+    if not normalized_cert_id:
+        return
+
+    conn = _connect_cert_db()
+    stored_path: Optional[Path] = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT stored_path
+            FROM certificates
+            WHERE cert_id = ?
+            """,
+            (normalized_cert_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return
+
+        stored_path = Path(str(row["stored_path"]))
+        cursor.execute("DELETE FROM certificates WHERE cert_id = ?", (normalized_cert_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+    if stored_path and stored_path.exists():
+        stored_path.unlink()
+
+
+def _upsert_local_agent(
+    agent_id: str,
+    *,
+    agent_name: Optional[str] = None,
+    agent_status: Optional[str] = None,
+    work_status: Optional[str] = None,
+    current_task: Optional[str] = None,
+    agent_capability: Optional[List[str]] = None,
+    last_update: Optional[str] = None,
+    launch_time: Optional[str] = None,
+    offline_time: Optional[str] = None,
+) -> None:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return
+
+    now_iso = datetime.utcnow().isoformat()
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time
+            FROM agents
+            WHERE agent_id = ?
+            """,
+            (normalized_agent_id,),
+        )
+        row = cursor.fetchone()
+        capability_json = (
+            json.dumps(agent_capability)
+            if agent_capability is not None
+            else (row["agent_capability"] if row else "[]")
+        )
+        resolved_name = (
+            str(agent_name).strip()
+            if agent_name is not None and str(agent_name).strip()
+            else (row["agent_name"] if row else normalized_agent_id)
+        )
+        resolved_status = (
+            str(agent_status).strip()
+            if agent_status is not None and str(agent_status).strip()
+            else (row["agent_status"] if row else "offline")
+        )
+        resolved_work_status = (
+            str(work_status).strip()
+            if work_status is not None and str(work_status).strip()
+            else (row["work_status"] if row else "idle")
+        )
+        resolved_task = (
+            str(current_task)
+            if current_task is not None
+            else (row["current_task"] if row else "")
+        )
+        resolved_last_update = (
+            str(last_update).strip()
+            if last_update is not None and str(last_update).strip()
+            else (row["last_update"] if row else now_iso)
+        )
+        resolved_launch_time = (
+            str(launch_time).strip()
+            if launch_time is not None and str(launch_time).strip()
+            else (row["launch_time"] if row else None)
+        )
+        resolved_offline_time = (
+            str(offline_time).strip()
+            if offline_time is not None and str(offline_time).strip()
+            else (row["offline_time"] if row else None)
+        )
+
+        if resolved_work_status != "idle" and resolved_status == "offline":
+            resolved_status = "online"
+        if resolved_status == "offline":
+            resolved_offline_time = resolved_offline_time or resolved_last_update or now_iso
+        else:
+            resolved_launch_time = resolved_launch_time or resolved_last_update or now_iso
+            resolved_offline_time = None
+
+        cursor.execute(
+            """
+            INSERT INTO agents (
+                agent_id, agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id) DO UPDATE SET
+                agent_name = excluded.agent_name,
+                agent_capability = excluded.agent_capability,
+                agent_status = excluded.agent_status,
+                work_status = excluded.work_status,
+                current_task = excluded.current_task,
+                last_update = excluded.last_update,
+                launch_time = excluded.launch_time,
+                offline_time = excluded.offline_time,
+                updated_at = excluded.updated_at
+            """,
+            (
+                normalized_agent_id,
+                resolved_name,
+                capability_json,
+                resolved_status,
+                resolved_work_status,
+                resolved_task,
+                resolved_last_update,
+                resolved_launch_time,
+                resolved_offline_time,
+                now_iso,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _upsert_local_task(
+    task_id: str,
+    agent_id: str,
+    *,
+    task_description: str = "",
+    task_name: str = "",
+    task_type: str = "",
+    status: str = "processing",
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> None:
+    normalized_task_id = str(task_id or "").strip()
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_task_id or not normalized_agent_id:
+        return
+
+    now_iso = datetime.utcnow().isoformat()
+    created_value = str(created_at or now_iso)
+    updated_value = str(updated_at or now_iso)
+
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO tasks (
+                agent_id, task_id, task_description, task_name, task_type, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(agent_id, task_id) DO UPDATE SET
+                task_description = excluded.task_description,
+                task_name = excluded.task_name,
+                task_type = excluded.task_type,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (
+                normalized_agent_id,
+                normalized_task_id,
+                str(task_description or ""),
+                str(task_name or ""),
+                str(task_type or ""),
+                str(status or "processing"),
+                created_value,
+                updated_value,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _remove_local_task(task_id: str) -> None:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (normalized_task_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _record_local_log(
+    source_kind: str,
+    summary: str,
+    payload: Dict[str, Any],
+    *,
+    source_name: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+) -> None:
+    conn = _connect_local_cache_db()
+    try:
+        conn.execute(
+            """
+            INSERT INTO ingested_logs (
+                source_kind, source_name, agent_id, task_id, summary, payload_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(source_kind),
+                str(source_name or ""),
+                str(agent_id or ""),
+                str(task_id or ""),
+                str(summary or ""),
+                json.dumps(payload, ensure_ascii=True),
+                datetime.utcnow().isoformat(),
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _reset_local_cache_state() -> None:
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tasks")
+        cursor.execute("DELETE FROM agents")
+        cursor.execute("DELETE FROM ingested_logs")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _prime_local_cache_from_runtime_state() -> None:
+    ensure_local_cache_db()
+    for agent_id, cached in agent_status_cache.items():
+        _upsert_local_agent(
+            agent_id,
+            agent_name=cached.get("agent_name"),
+            agent_status=cached.get("agent_status"),
+            work_status=cached.get("work_status"),
+            current_task=cached.get("current_task"),
+            agent_capability=cached.get("agent_capability")
+            if isinstance(cached.get("agent_capability"), list)
+            else None,
+            last_update=cached.get("last_update"),
+            launch_time=cached.get("launch_time"),
+            offline_time=cached.get("offline_time"),
+        )
+
+    for task_id, metadata in task_control_registry.items():
+        if metadata.get("status") != "processing":
+            continue
+        for agent_id in metadata.get("agent_ids", []):
+            _upsert_local_task(
+                str(task_id),
+                str(agent_id),
+                task_description=str(metadata.get("task_description") or ""),
+                task_name=str(metadata.get("task_name") or ""),
+                task_type=str(metadata.get("task_type") or ""),
+                status="processing",
+                created_at=str(metadata.get("created_at") or datetime.utcnow().isoformat()),
+                updated_at=str(metadata.get("updated_at") or datetime.utcnow().isoformat()),
+            )
+
+
+def _insert_task_record(
+    agent_id: str,
+    task_id: str,
+    task_description: str,
+    *,
+    task_name: str = "",
+    task_type: str = "",
+    created_at: Optional[str] = None,
+    updated_at: Optional[str] = None,
+) -> None:
+    if should_use_external_db():
+        conn = _connect_external_db_writable(get_external_db_path())
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO tasks (agent_id, task_id, task_description) VALUES (?, ?, ?)",
+                (agent_id, task_id, task_description),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    _upsert_local_task(
+        task_id,
+        agent_id,
+        task_description=task_description,
+        task_name=task_name,
+        task_type=task_type,
+        status="processing",
+        created_at=created_at,
+        updated_at=updated_at,
+    )
+
+
+def _delete_task_records(task_id: str) -> None:
+    if should_use_external_db():
+        conn = _connect_external_db_writable(get_external_db_path())
+        try:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    _remove_local_task(task_id)
+
+
+def _parse_json_if_needed(value: Any) -> Any:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
+
+
+def _claim_agent_names_from_content(value: Any, target_agent_id: str = "") -> List[str]:
+    value = _parse_json_if_needed(value)
+    names: List[str] = []
+
+    if isinstance(value, list):
+        for item in value:
+            names.extend(_claim_agent_names_from_content(item, target_agent_id))
+        return names
+
+    if not isinstance(value, dict):
+        return names
+
+    claims = value.get("claims") if isinstance(value.get("claims"), dict) else None
+    if claims:
+        claim_agent_id = str(claims.get("agent_id") or "").strip()
+        claim_agent_name = str(claims.get("agent_name") or "").strip()
+        if claim_agent_name and (not target_agent_id or claim_agent_id == target_agent_id):
+            names.append(claim_agent_name)
+
+    for key in ("vc_list", "credentials", "vcs"):
+        if isinstance(value.get(key), list):
+            names.extend(_claim_agent_names_from_content(value[key], target_agent_id))
+
+    for key, nested in value.items():
+        if str(key).startswith("vc") and isinstance(nested, dict):
+            names.extend(_claim_agent_names_from_content(nested, target_agent_id))
+
+    return names
+
+
+def _agent_claim_name_lookup(limit: int = 5000) -> Dict[str, str]:
+    lookup: Dict[str, str] = {}
+    try:
+        conn = _connect_local_cache_db()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT agent_id, payload_json
+                FROM ingested_logs
+                WHERE payload_json IS NOT NULL
+                  AND payload_json != ''
+                  AND payload_json LIKE '%agent_name%'
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+            rows = cursor.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return lookup
+
+    for row in rows:
+        agent_id = str(row["agent_id"] or "").strip()
+        payload = _parse_json_if_needed(row["payload_json"])
+        content = payload.get("content") if isinstance(payload, dict) else payload
+        if not agent_id and isinstance(content, dict):
+            agent_id = str(content.get("agent_id") or "").strip()
+        if not agent_id:
+            continue
+
+        names = _claim_agent_names_from_content(content, agent_id)
+        if names:
+            lookup.setdefault(agent_id, names[0])
+    return lookup
+
+
+def _is_identifier_like_name(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return (
+        not normalized
+        or normalized.startswith("did:")
+        or normalized.startswith("type")
+        or "self_id" in normalized
+        or "@6gc." in normalized
+    )
+
+
+def _resolve_agent_display_name(
+    agent: Dict[str, Any], claim_name_lookup: Optional[Dict[str, str]] = None
+) -> str:
+    agent_id = str(agent.get("agent_id") or "").strip()
+    claim_name = (claim_name_lookup or {}).get(agent_id, "")
+    current_name = str(agent.get("agent_name") or "").strip()
+
+    if claim_name and (_is_identifier_like_name(current_name) or current_name == agent_id):
+        return claim_name
+    return current_name or claim_name or agent_id
 
 
 # WebSocket connection manager
@@ -256,6 +1215,172 @@ async def _broadcast_video_tracks() -> None:
     )
 
 
+def _clear_direct_video_runtime(track_id: str = DIRECT_VIDEO_TRACK_ID) -> None:
+    DIRECT_VIDEO_TRACKS.pop(track_id, None)
+    video_gateway.latest_frames.pop(track_id, None)
+    video_gateway.buffers.pop(track_id, None)
+    video_gateway.subscribers.pop(track_id, None)
+
+
+async def _start_direct_video_demo_if_needed() -> bool:
+    global direct_video_demo_task
+    if not bool(direct_demo_settings.get("enabled", True)):
+        return False
+    if direct_video_demo_task and not direct_video_demo_task.done():
+        return True
+
+    _upsert_direct_video_track()
+    direct_video_demo_task = asyncio.create_task(_run_direct_video_demo())
+    add_log_entry("[Direct Demo Camera] Demo camera opened.", "info")
+    await _broadcast_video_tracks()
+    return True
+
+
+async def _stop_direct_video_demo(track_id: str = DIRECT_VIDEO_TRACK_ID) -> bool:
+    global direct_video_demo_task
+    task_existed = direct_video_demo_task is not None
+    track_existed = track_id in DIRECT_VIDEO_TRACKS
+    if direct_video_demo_task:
+        direct_video_demo_task.cancel()
+        try:
+            await direct_video_demo_task
+        except asyncio.CancelledError:
+            pass
+        direct_video_demo_task = None
+
+    _clear_direct_video_runtime(track_id)
+    if task_existed or track_existed:
+        add_log_entry("[Direct Demo Camera] Demo camera closed.", "info")
+    await _broadcast_video_tracks()
+    return True
+
+
+def _get_direct_demo_camera_status() -> Dict[str, Any]:
+    enabled = bool(direct_demo_settings.get("enabled", True))
+    running = bool(direct_video_demo_task and not direct_video_demo_task.done())
+    track_available = DIRECT_VIDEO_TRACK_ID in DIRECT_VIDEO_TRACKS
+    return {
+        "enabled": enabled,
+        "running": running,
+        "trackAvailable": track_available,
+        "trackId": DIRECT_VIDEO_TRACK_ID,
+        "trackName": "Direct Demo Camera",
+    }
+
+
+def _normalize_virtual_agent_capabilities(value: Any) -> List[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [
+        part.strip()
+        for part in str(value or "").split(",")
+        if part.strip()
+    ]
+
+
+def _build_virtual_agent_id(agent_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", agent_name.lower()).strip("-")
+    slug = slug or "virtual-agent"
+    return f"did:acn:agent:virtual-{slug}-{secrets.token_hex(3)}"
+
+
+async def add_virtual_agent(request: Dict[str, Any]) -> Dict[str, Any]:
+    agent_name = str(request.get("agentName") or request.get("agent_name") or "").strip()
+    if not agent_name:
+        raise HTTPException(status_code=400, detail="Agent name is required.")
+
+    agent_id = str(request.get("agentId") or request.get("agent_id") or "").strip()
+    if not agent_id:
+        agent_id = _build_virtual_agent_id(agent_name)
+
+    capabilities = _normalize_virtual_agent_capabilities(
+        request.get("capabilities") or request.get("agentCapability") or request.get("agent_capability")
+    )
+    agent_status = str(request.get("status") or "online").strip().lower()
+    if agent_status not in {"online", "busy", "offline"}:
+        agent_status = "online"
+
+    current_task = str(request.get("currentTask") or request.get("current_task") or "").strip()
+    work_status = "working" if agent_status == "busy" or current_task else "idle"
+    if current_task and agent_status == "online":
+        agent_status = "busy"
+
+    now_iso = datetime.utcnow().isoformat()
+    cache_entry = _ensure_agent_cache_entry(agent_id, agent_name=agent_name)
+    cache_entry["agent_name"] = agent_name
+    cache_entry["agent_capability"] = capabilities
+    cache_entry["agent_status"] = "offline" if agent_status == "offline" else "online"
+    cache_entry["work_status"] = work_status
+    cache_entry["current_task"] = current_task
+    cache_entry["is_demo"] = True
+    cache_entry["is_virtual"] = True
+    _sync_agent_timeline(cache_entry, status=cache_entry["agent_status"], timestamp=now_iso)
+
+    _upsert_local_agent(
+        agent_id,
+        agent_name=agent_name,
+        agent_status=cache_entry["agent_status"],
+        work_status=work_status,
+        current_task=current_task,
+        agent_capability=capabilities,
+        last_update=now_iso,
+        launch_time=cache_entry.get("launch_time"),
+        offline_time=cache_entry.get("offline_time"),
+    )
+
+    if current_task:
+        task_id = f"virtual-task-{secrets.token_hex(3)}"
+        _upsert_local_task(
+            task_id,
+            agent_id,
+            task_description=current_task,
+            task_name=current_task,
+            task_type="Virtual",
+            status="processing",
+            created_at=now_iso,
+            updated_at=now_iso,
+        )
+        task_control_registry[task_id] = {
+            "task_name": current_task,
+            "task_type": "Virtual",
+            "task_description": current_task,
+            "agent_ids": [agent_id],
+            "agent_names": {agent_id: agent_name},
+            "status": "processing",
+            "created_at": now_iso,
+            "updated_at": now_iso,
+            "is_demo": True,
+        }
+
+    add_log_entry(f"[Virtual Agent] Added virtual agent: {agent_name} ({agent_id})", "info")
+
+    dashboard = build_dashboard_snapshot()
+    tasks = build_control_tasks_snapshot()
+    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+    await manager.broadcast(
+        {
+            "type": "TASKS_UPDATED",
+            "payload": {
+                "timestamp": datetime.utcnow().isoformat(),
+                "tasks": tasks,
+                "dashboard": dashboard,
+            },
+        }
+    )
+
+    return {
+        "agent": {
+            "agentID": agent_id,
+            "agentName": agent_name,
+            "capabilities": capabilities,
+            "status": agent_status,
+            "currentTask": current_task,
+        },
+        "dashboard": dashboard,
+        "tasks": tasks,
+    }
+
+
 async def _run_direct_video_demo(track_id: str = DIRECT_VIDEO_TRACK_ID):
     frame_index = 0
     width, height = 960, 540
@@ -310,70 +1435,135 @@ async def _run_direct_video_demo(track_id: str = DIRECT_VIDEO_TRACK_ID):
 
 
 # Database helper
-def get_agents_from_db() -> List[Dict[str, Any]]:
-    """Get all agents from database and check for active tasks"""
-    try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+def _parse_agent_rows(
+    rows: List[sqlite3.Row], agents_with_tasks: set[str]
+) -> List[Dict[str, Any]]:
+    agents = []
+    for row in rows:
+        agent = dict(row)
+        if agent.get("agent_capability"):
+            try:
+                agent["agent_capability"] = json.loads(agent["agent_capability"])
+            except Exception:
+                agent["agent_capability"] = []
+        else:
+            agent["agent_capability"] = []
 
-        # Get all agents
+        original_status = agent.get("agent_status", "offline")
+        if agent.get("agent_id") in agents_with_tasks:
+            agent["agent_status"] = "working"
+        else:
+            agent["agent_status"] = original_status if original_status else "offline"
+
+        agents.append(agent)
+    return agents
+
+
+def _group_task_rows(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        entry = dict(row)
+        task_id = str(entry.get("task_id") or f"task-{entry.get('id')}")
+        task = grouped.setdefault(
+            task_id,
+            {
+                "id": task_id,
+                "description": entry.get("task_description") or "",
+                "agent_ids": [],
+            },
+        )
+        agent_id = entry.get("agent_id")
+        if agent_id and agent_id not in task["agent_ids"]:
+            task["agent_ids"].append(agent_id)
+        if not task["description"] and entry.get("task_description"):
+            task["description"] = entry["task_description"]
+    return list(grouped.values())
+
+
+def _get_agents_from_external_db(path: str) -> List[Dict[str, Any]]:
+    conn = _connect_external_db_readonly(path)
+    try:
+        cursor = conn.cursor()
         cursor.execute("SELECT * FROM agents")
         rows = cursor.fetchall()
-
-        # Get all agents with active tasks (agents that have entries in tasks table)
         cursor.execute("SELECT DISTINCT agent_id FROM tasks")
         agents_with_tasks = {row[0] for row in cursor.fetchall()}
-
+        return _parse_agent_rows(rows, agents_with_tasks)
+    finally:
         conn.close()
 
-        agents = []
-        for row in rows:
-            agent = dict(row)
-            # Parse JSON capabilities
-            if agent.get("agent_capability"):
-                try:
-                    agent["agent_capability"] = json.loads(agent["agent_capability"])
-                except:
-                    agent["agent_capability"] = []
-            else:
-                agent["agent_capability"] = []
 
-            # Determine agent status: if agent has task_id (exists in tasks table), mark as working
-            original_status = agent.get("agent_status", "offline")
-            if agent.get("agent_id") in agents_with_tasks:
-                agent["agent_status"] = "working"
-            else:
-                agent["agent_status"] = (
-                    original_status if original_status else "offline"
-                )
+def _get_agents_from_local_db() -> List[Dict[str, Any]]:
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT agent_id, agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time
+            FROM agents
+            ORDER BY updated_at DESC
+            """
+        )
+        rows = cursor.fetchall()
+        cursor.execute("SELECT DISTINCT agent_id FROM tasks WHERE status = 'processing'")
+        agents_with_tasks = {row[0] for row in cursor.fetchall()}
+        return _parse_agent_rows(rows, agents_with_tasks)
+    finally:
+        conn.close()
 
-            agents.append(agent)
-        return agents
+
+def get_agents_from_db() -> List[Dict[str, Any]]:
+    """Get agents from the configured source, with local-cache fallback."""
+    if should_use_external_db():
+        try:
+            return _get_agents_from_external_db(get_external_db_path())
+        except Exception as e:
+            print(f"[Database Error] {e}")
+            return _get_agents_from_local_db()
+    try:
+        return _get_agents_from_local_db()
     except Exception as e:
-        print(f"[Database Error] {e}")
+        print(f"[Local Database Error] {e}")
         return []
 
 
-def get_task_count_from_db() -> int:
-    """Get total task count from database."""
+def _get_task_count_from_external_db(path: str) -> int:
+    conn = _connect_external_db_readonly(path)
     try:
-        conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM tasks")
-        value = int(cursor.fetchone()[0] or 0)
+        return int(cursor.fetchone()[0] or 0)
+    finally:
         conn.close()
-        return value
+
+
+def _get_task_count_from_local_db() -> int:
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM tasks WHERE status = 'processing'")
+        return int(cursor.fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+
+def get_task_count_from_db() -> int:
+    """Get total task count from the configured source."""
+    try:
+        if should_use_external_db():
+            return _get_task_count_from_external_db(get_external_db_path())
+        return _get_task_count_from_local_db()
     except Exception as e:
         print(f"[Task Count Error] {e}")
-        return 0
+        try:
+            return _get_task_count_from_local_db()
+        except Exception:
+            return 0
 
 
-def get_tasks_from_db() -> List[Dict[str, Any]]:
-    """Get active tasks grouped by task_id from database."""
+def _get_tasks_from_external_db(path: str) -> List[Dict[str, Any]]:
+    conn = _connect_external_db_readonly(path)
     try:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         cursor.execute(
             """
@@ -383,30 +1573,41 @@ def get_tasks_from_db() -> List[Dict[str, Any]]:
             """
         )
         rows = cursor.fetchall()
+        return _group_task_rows(rows)
+    finally:
         conn.close()
 
-        grouped: Dict[str, Dict[str, Any]] = {}
-        for row in rows:
-            entry = dict(row)
-            task_id = str(entry.get("task_id") or f"task-{entry.get('id')}")
-            task = grouped.setdefault(
-                task_id,
-                {
-                    "id": task_id,
-                    "description": entry.get("task_description") or "",
-                    "agent_ids": [],
-                },
-            )
-            agent_id = entry.get("agent_id")
-            if agent_id and agent_id not in task["agent_ids"]:
-                task["agent_ids"].append(agent_id)
-            if not task["description"] and entry.get("task_description"):
-                task["description"] = entry["task_description"]
 
-        return list(grouped.values())
+def _get_tasks_from_local_db() -> List[Dict[str, Any]]:
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id, agent_id, task_id, task_description
+            FROM tasks
+            WHERE status = 'processing'
+            ORDER BY id DESC
+            """
+        )
+        rows = cursor.fetchall()
+        return _group_task_rows(rows)
+    finally:
+        conn.close()
+
+
+def get_tasks_from_db() -> List[Dict[str, Any]]:
+    """Get active tasks from the configured source, with local-cache fallback."""
+    try:
+        if should_use_external_db():
+            return _get_tasks_from_external_db(get_external_db_path())
+        return _get_tasks_from_local_db()
     except Exception as e:
         print(f"[Task Query Error] {e}")
-        return []
+        try:
+            return _get_tasks_from_local_db()
+        except Exception:
+            return []
 
 
 def _extract_task_type(description: str) -> Optional[str]:
@@ -567,12 +1768,98 @@ def _format_relative_time(value: Any) -> str:
     return f"{delta_seconds // 86400}d ago"
 
 
+def _format_timestamp_display(value: Any) -> str:
+    parsed = _parse_timestamp(value)
+    if not parsed:
+        return "Unknown"
+    return parsed.strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def _format_elapsed_since(value: Any) -> str:
+    parsed = _parse_timestamp(value)
+    if not parsed:
+        return "Unknown"
+
+    delta_seconds = max(int((datetime.utcnow() - parsed).total_seconds()), 0)
+    days, remainder = divmod(delta_seconds, 86400)
+    hours, remainder = divmod(remainder, 3600)
+    minutes, _ = divmod(remainder, 60)
+
+    if days:
+        return f"{days}d {hours:02d}h"
+    if hours:
+        return f"{hours}h {minutes:02d}m"
+    return f"{minutes}m"
+
+
 def _normalize_capabilities(value: Any) -> List[str]:
     if isinstance(value, list):
         return [str(item) for item in value if item]
     if isinstance(value, str) and value.strip():
         return [value.strip()]
     return []
+
+
+def _default_agent_cache_entry(agent_id: str, agent_name: Optional[str] = None) -> Dict[str, Any]:
+    fallback_name = str(agent_name or agent_id).strip() or agent_id
+    return {
+        "agent_id": agent_id,
+        "agent_name": fallback_name,
+        "work_status": "idle",
+        "current_task": "",
+        "logs": [],
+        "agent_status": "online",
+        "agent_capability": [],
+        "last_update": None,
+        "launch_time": None,
+        "offline_time": None,
+        "is_demo": False,
+    }
+
+
+def _ensure_agent_cache_entry(agent_id: str, agent_name: Optional[str] = None) -> Dict[str, Any]:
+    entry = agent_status_cache.setdefault(
+        agent_id,
+        _default_agent_cache_entry(agent_id, agent_name=agent_name),
+    )
+    entry.setdefault("logs", [])
+    entry.setdefault("agent_capability", [])
+    entry.setdefault("launch_time", None)
+    entry.setdefault("offline_time", None)
+    if agent_name:
+        entry["agent_name"] = agent_name
+    elif not entry.get("agent_name"):
+        entry["agent_name"] = agent_id
+    return entry
+
+
+def _sync_agent_timeline(
+    cache_entry: Dict[str, Any],
+    *,
+    status: Optional[str],
+    timestamp: Optional[str],
+) -> str:
+    normalized_timestamp = (
+        str(timestamp).strip() if timestamp and str(timestamp).strip() else datetime.utcnow().isoformat()
+    )
+    normalized_status = str(status or "").lower()
+    next_state = "offline" if normalized_status == "offline" else "online"
+    previous_state = (
+        "offline" if str(cache_entry.get("agent_status", "")).lower() == "offline" else "online"
+    )
+
+    if next_state == "offline":
+        if previous_state != "offline" or not cache_entry.get("offline_time"):
+            cache_entry["offline_time"] = normalized_timestamp
+        cache_entry["agent_status"] = "offline"
+    else:
+        if previous_state == "offline" or not cache_entry.get("launch_time"):
+            cache_entry["launch_time"] = normalized_timestamp
+        cache_entry["offline_time"] = None
+        cache_entry["agent_status"] = "online"
+
+    cache_entry["last_update"] = normalized_timestamp
+    return normalized_timestamp
 
 
 def _dashboard_status_from_agent(agent: Dict[str, Any]) -> str:
@@ -609,15 +1896,35 @@ def _dashboard_region_from_agent(agent: Dict[str, Any]) -> str:
     return "ACN Mesh"
 
 
-def _dashboard_throughput_from_agent(agent: Dict[str, Any]) -> str:
-    status = _dashboard_status_from_agent(agent)
-    if status == "offline":
-        return "0.0 Gbps"
+def _build_agent_track_inventory() -> Dict[str, List[Dict[str, Any]]]:
+    if not MOQ_AVAILABLE:
+        return {}
 
-    seed = sum(ord(char) for char in str(agent.get("agent_id", "agent")))
-    base = 28 if status == "online" else 52
-    throughput = (base + (seed % 43)) / 10
-    return f"{throughput:.1f} Gbps"
+    inventory: Dict[str, List[Dict[str, Any]]] = {}
+    for track in moq_video_subscriber.list_discovered_tracks():
+        if str(track.get("source") or "moq") != "moq":
+            continue
+        agent_id = str(track.get("agentId") or "").strip()
+        if not agent_id:
+            continue
+        inventory.setdefault(agent_id, []).append(track)
+
+    for tracks in inventory.values():
+        tracks.sort(
+            key=lambda item: str(item.get("lastSeen") or item.get("discoveredAt") or ""),
+            reverse=True,
+        )
+    return inventory
+
+
+def _dashboard_track_summary(track_names: List[str]) -> str:
+    if not track_names:
+        return "No track"
+    if len(track_names) == 1:
+        return track_names[0]
+    if len(track_names) == 2:
+        return f"{track_names[0]}, {track_names[1]}"
+    return f"{track_names[0]}, {track_names[1]} +{len(track_names) - 2}"
 
 
 def _dashboard_summary_from_agent(agent: Dict[str, Any]) -> str:
@@ -745,8 +2052,220 @@ def build_element_status_snapshot() -> List[Dict[str, Any]]:
     return sorted(snapshots, key=lambda item: item["name"])
 
 
-def _canonical_flow_node(name: str) -> Optional[str]:
+def build_network_element_control_snapshot() -> List[Dict[str, Any]]:
+    status_by_id = {str(group.get("id")): group for group in build_element_status_snapshot()}
+    controls = []
+    for element_id, config in NETWORK_ELEMENT_CONTROL_SCRIPTS.items():
+        script_path = config["script"]
+        group_status = status_by_id.get(element_id, {})
+        controls.append(
+            {
+                "id": element_id,
+                "name": config["name"],
+                "description": config["description"],
+                "scriptPath": str(script_path),
+                "scriptExists": script_path.exists(),
+                "status": group_status.get("status", "offline"),
+                "summary": group_status.get("summary", "Status unavailable."),
+                "components": group_status.get("components", []),
+            }
+        )
+    return controls
+
+
+async def run_network_element_action(element_id: str, action: str) -> Dict[str, Any]:
+    normalized_element_id = str(element_id or "").strip()
+    normalized_action = str(action or "").strip().lower()
+    config = NETWORK_ELEMENT_CONTROL_SCRIPTS.get(normalized_element_id)
+
+    if config is None:
+        raise HTTPException(status_code=404, detail=f"Unknown network element: {element_id}")
+    if normalized_action not in NETWORK_ELEMENT_CONTROL_ACTIONS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Action must be one of: {', '.join(sorted(NETWORK_ELEMENT_CONTROL_ACTIONS))}",
+        )
+
+    script_path: Path = config["script"]
+    if not script_path.exists() or not script_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Control script not found: {script_path}",
+        )
+
+    add_log_entry(
+        f"[Element Control] Running {config['name']} {normalized_action}: {script_path} {normalized_action}",
+        "warning" if normalized_action in {"stop", "restart"} else "info",
+    )
+
+    with tempfile.NamedTemporaryFile() as stdout_file, tempfile.NamedTemporaryFile() as stderr_file:
+        process = await asyncio.create_subprocess_exec(
+            str(script_path),
+            normalized_action,
+            cwd=str(script_path.parent),
+            stdout=stdout_file,
+            stderr=stderr_file,
+            start_new_session=True,
+        )
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=120.0)
+        except asyncio.TimeoutError as exc:
+            if process.returncode is None:
+                try:
+                    process.kill()
+                except ProcessLookupError:
+                    pass
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    pass
+
+            stdout_file.seek(0)
+            stderr_file.seek(0)
+            stdout = stdout_file.read().decode("utf-8", errors="replace").strip()
+            stderr = stderr_file.read().decode("utf-8", errors="replace").strip()
+            detail = stderr or stdout or f"{config['name']} {normalized_action} timed out after 120 seconds."
+            add_log_entry(
+                f"[Element Control] {config['name']} {normalized_action} timed out after 120s: {detail[:300]}",
+                "error",
+            )
+            raise HTTPException(
+                status_code=504,
+                detail={
+                    "error": f"{config['name']} {normalized_action} timed out.",
+                    "detail": detail[:1000],
+                    "exitCode": -1,
+                },
+            ) from exc
+
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", errors="replace").strip()
+        stderr = stderr_file.read().decode("utf-8", errors="replace").strip()
+
+    exit_code = int(process.returncode or 0)
+
+    if exit_code != 0:
+        detail = stderr or stdout or f"Script exited with code {exit_code}."
+        add_log_entry(
+            f"[Element Control] {config['name']} {normalized_action} failed with exit code {exit_code}: {detail[:300]}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": f"{config['name']} {normalized_action} failed.",
+                "detail": detail[:1000],
+                "exitCode": exit_code,
+            },
+        )
+
+    add_log_entry(
+        f"[Element Control] {config['name']} {normalized_action} completed successfully",
+        "info",
+    )
+
+    return {
+        "elementId": normalized_element_id,
+        "elementName": config["name"],
+        "action": normalized_action,
+        "exitCode": exit_code,
+        "stdout": stdout[-2000:],
+        "stderr": stderr[-2000:],
+    }
+
+
+def _network_element_error_result(
+    element_id: str, action: str, error: Any
+) -> Dict[str, Any]:
+    config = NETWORK_ELEMENT_CONTROL_SCRIPTS.get(element_id, {})
+    detail = getattr(error, "detail", error)
+    if isinstance(detail, dict):
+        message = str(detail.get("detail") or detail.get("error") or detail)
+        exit_code = int(detail.get("exitCode", -1) or -1)
+    else:
+        message = str(detail)
+        exit_code = -1
+
+    return {
+        "elementId": element_id,
+        "elementName": config.get("name", element_id),
+        "action": action,
+        "exitCode": exit_code,
+        "stdout": "",
+        "stderr": message[:2000],
+    }
+
+
+async def run_network_element_batch_action(action: str) -> Dict[str, Any]:
+    normalized_action = str(action or "").strip().lower()
+    if normalized_action not in {"start", "restart"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch action must be start or restart.",
+        )
+
+    if normalized_action == "start":
+        snapshot = build_network_element_control_snapshot()
+        target_ids = [
+            str(element.get("id"))
+            for element in snapshot
+            if element.get("id") and element.get("status") == "offline"
+        ]
+    else:
+        target_ids = list(NETWORK_ELEMENT_CONTROL_SCRIPTS.keys())
+
+    if not target_ids:
+        message = "No offline network elements to start."
+        add_log_entry(f"[Element Control] {message}", "info")
+        return {
+            "elementId": "all",
+            "elementName": "All Network Elements",
+            "action": normalized_action,
+            "exitCode": 0,
+            "stdout": message,
+            "stderr": "",
+            "results": [],
+        }
+
+    results = []
+    for target_id in target_ids:
+        try:
+            results.append(await run_network_element_action(target_id, normalized_action))
+        except HTTPException as exc:
+            results.append(_network_element_error_result(target_id, normalized_action, exc))
+        except Exception as exc:
+            results.append(_network_element_error_result(target_id, normalized_action, exc))
+
+    failed = [result for result in results if int(result.get("exitCode", -1)) != 0]
+    stdout = "\n\n".join(
+        f"[{result['elementName']}]\n{result.get('stdout') or 'No output'}"
+        for result in results
+    )
+    stderr = "\n\n".join(
+        f"[{result['elementName']}]\n{result.get('stderr')}"
+        for result in results
+        if result.get("stderr")
+    )
+    exit_code = 0 if not failed else 1
+
+    return {
+        "elementId": "all",
+        "elementName": "All Network Elements",
+        "action": normalized_action,
+        "exitCode": exit_code,
+        "stdout": stdout[-2000:],
+        "stderr": stderr[-2000:],
+        "results": results,
+    }
+
+
+def _canonical_flow_node(name: str, abstract: str = "") -> Optional[str]:
     normalized = (name or "").strip().lower()
+    normalized = normalized.replace("（", "(").replace("）", ")")
+    normalized_abstract = (abstract or "").strip().lower()
+    normalized_abstract = normalized_abstract.replace("（", "(").replace("）", ")")
     if not normalized:
         return None
 
@@ -756,15 +2275,34 @@ def _canonical_flow_node(name: str) -> Optional[str]:
     if "idm" in normalized:
         return "IDM"
 
+    if "relay" in normalized or "moq relay" in normalized:
+        return "Relay"
+
+    if "arf" in normalized:
+        return "ARF"
+
+    if "acf" in normalized:
+        return "ACF"
+
     if (
         "agent gw" in normalized
         or "agentgw" in normalized
-        or normalized == "arf"
-        or normalized == "acf"
         or "/arf/" in normalized
         or "/acf/" in normalized
     ):
-        return "AgentGW"
+        if "relay" in normalized_abstract or "moq" in normalized_abstract:
+            return "Relay"
+        if "acf" in normalized_abstract or "setup connection" in normalized_abstract:
+            return "ACF"
+        if (
+            "arf" in normalized_abstract
+            or "agent-card" in normalized_abstract
+            or "agent-cards" in normalized_abstract
+            or "vc-verification" in normalized_abstract
+            or "vc-verifications" in normalized_abstract
+        ):
+            return "ARF"
+        return "ACF"
 
     if (
         "acn agent" in normalized
@@ -787,10 +2325,21 @@ def build_message_flow_snapshot(
         status = str(element.get("status", "offline")).lower()
         if name:
             element_status_map[name] = "offline" if status == "offline" else "online"
+        for component in element.get("components", []) or []:
+            component_name = str(component.get("name", "")).strip()
+            component_status = str(component.get("status", "offline")).lower()
+            if component_name:
+                element_status_map[component_name] = (
+                    "offline" if component_status == "offline" else "online"
+                )
 
     recent_events = list(reversed(pipeline_log_buffer[-limit:])) if pipeline_log_buffer else []
     edge_map: Dict[tuple, Dict[str, Any]] = {}
     now = datetime.utcnow()
+    ttl_seconds = float(message_flow_display_runtime.get("ttl_seconds", MESSAGE_FLOW_TTL_SECONDS))
+    active_seconds = float(
+        message_flow_display_runtime.get("active_seconds", MESSAGE_FLOW_ACTIVE_SECONDS)
+    )
 
     for event in recent_events:
         timestamp = _parse_timestamp(event.get("timestamp"))
@@ -798,16 +2347,16 @@ def build_message_flow_snapshot(
             continue
 
         age_seconds = (now - timestamp).total_seconds()
-        if age_seconds < 0 or age_seconds > MESSAGE_FLOW_TTL_SECONDS:
+        if age_seconds < 0 or age_seconds > ttl_seconds:
             continue
 
-        source = _canonical_flow_node(str(event.get("source", "")))
-        target = _canonical_flow_node(str(event.get("destination", "")))
+        abstract = str(event.get("abstract", "")).strip() or str(event.get("content", "")).strip() or "Message flow"
+        source = _canonical_flow_node(str(event.get("source", "")), abstract)
+        target = _canonical_flow_node(str(event.get("destination", "")), abstract)
         if not source or not target or source == target:
             continue
 
         key = (source, target)
-        abstract = str(event.get("abstract", "")).strip() or str(event.get("content", "")).strip() or "Message flow"
         if "响应返回" in abstract:
             continue
         entry = edge_map.get(key)
@@ -819,7 +2368,7 @@ def build_message_flow_snapshot(
                 "count": 1,
                 "lastMessage": abstract[:96],
                 "lastTimestamp": event.get("timestamp"),
-                "active": age_seconds <= MESSAGE_FLOW_ACTIVE_SECONDS,
+                "active": age_seconds <= active_seconds,
             }
         else:
             entry["count"] += 1
@@ -827,7 +2376,7 @@ def build_message_flow_snapshot(
                 entry["lastMessage"] = abstract[:96]
             if not entry.get("lastTimestamp"):
                 entry["lastTimestamp"] = event.get("timestamp")
-            entry["active"] = entry["active"] or age_seconds <= MESSAGE_FLOW_ACTIVE_SECONDS
+            entry["active"] = entry["active"] or age_seconds <= active_seconds
 
     nodes = []
     for name, position in FLOW_NODE_LAYOUTS.items():
@@ -857,7 +2406,7 @@ def _merge_cached_agent_fields(
     combined = dict(base_agent)
 
     # Runtime-only fields from live logs.
-    for field in ("work_status", "current_task", "logs", "last_update"):
+    for field in ("work_status", "current_task", "logs", "last_update", "launch_time", "offline_time"):
         if field in cached_agent and cached_agent.get(field) not in (None, ""):
             combined[field] = cached_agent[field]
 
@@ -888,6 +2437,17 @@ def _merge_agent_sources() -> List[Dict[str, Any]]:
         if not agent_id:
             continue
 
+        cache_entry = _ensure_agent_cache_entry(
+            agent_id,
+            agent_name=str(agent.get("agent_name") or agent_id),
+        )
+        if agent.get("agent_capability") and not cache_entry.get("agent_capability"):
+            cache_entry["agent_capability"] = agent.get("agent_capability")
+        _sync_agent_timeline(
+            cache_entry,
+            status=agent.get("agent_status"),
+            timestamp=agent.get("last_update"),
+        )
         cached = agent_status_cache.get(agent_id)
         combined = (
             _merge_cached_agent_fields(agent, cached)
@@ -937,23 +2497,53 @@ def _dashboard_position(index: int) -> Dict[str, int]:
 
 def build_dashboard_agents() -> List[Dict[str, Any]]:
     dashboard_agents: List[Dict[str, Any]] = []
+    agent_tracks = _build_agent_track_inventory()
+    claim_name_lookup = _agent_claim_name_lookup()
 
     for index, agent in enumerate(_merge_agent_sources()):
         agent_id = str(agent.get("agent_id") or f"agent-{index}")
+        display_name = _resolve_agent_display_name(agent, claim_name_lookup)
+        agent = {**agent, "agent_name": display_name}
         status = _dashboard_status_from_agent(agent)
         capabilities = _normalize_capabilities(agent.get("agent_capability"))
         logs = agent.get("logs", [])
+        tracks = agent_tracks.get(agent_id, [])
+        track_names = [
+            str(track.get("trackName") or track.get("normalizedTrackName") or "Track")
+            for track in tracks
+        ]
+        launch_time = agent.get("launch_time") or agent.get("last_update")
+        offline_time = agent.get("offline_time") if status == "offline" else None
 
         dashboard_agents.append(
             {
                 "id": agent_id,
-                "name": str(agent.get("agent_name") or agent_id),
+                "name": display_name,
                 "role": _dashboard_role_from_agent(agent),
                 "status": status,
                 "region": _dashboard_region_from_agent(agent),
-                "throughput": _dashboard_throughput_from_agent(agent),
+                "trackSummary": _dashboard_track_summary(track_names),
+                "tracks": [
+                    {
+                        "id": str(track.get("trackId") or ""),
+                        "name": str(
+                            track.get("trackName")
+                            or track.get("normalizedTrackName")
+                            or "Track"
+                        ),
+                        "taskId": str(track.get("taskId") or ""),
+                        "namespace": str(track.get("namespace") or ""),
+                        "watchState": str(track.get("watchState") or "available"),
+                        "lastSeen": str(track.get("lastSeen") or ""),
+                    }
+                    for track in tracks
+                ],
                 "summary": _dashboard_summary_from_agent(agent),
-                "uptime": "Unknown" if status == "offline" else "Online",
+                "uptime": "Unavailable"
+                if status == "offline"
+                else _format_elapsed_since(launch_time),
+                "launchTime": _format_timestamp_display(launch_time),
+                "offlineTime": _format_timestamp_display(offline_time),
                 "lastHeartbeat": _format_relative_time(
                     agent.get("last_update") or datetime.utcnow().isoformat()
                 ),
@@ -1137,7 +2727,7 @@ def build_topology_test_messages() -> List[Dict[str, Any]]:
             "task_id": "topology-identity",
             "protocol": "HTTP/2",
             "headers": "",
-            "abstract": "Register agent identity",
+            "abstract": "identity-applications",
             "content": "ACN SDK starts identity registration",
         },
         {
@@ -1151,34 +2741,54 @@ def build_topology_test_messages() -> List[Dict[str, Any]]:
             "content": "ACN Agent forwards the identity application to IDM",
         },
         {
-            "source": "IDM",
-            "destination": "ACN SDK",
+            "source": "ACN SDK",
+            "destination": "ACN Agent",
             "timestamp": (now + timedelta(milliseconds=240)).isoformat(),
-            "task_id": "topology-identity",
+            "task_id": "topology-card",
             "protocol": "HTTP/2",
             "headers": "",
-            "abstract": "/idm/v1/identity-applications响应返回ACN SDK",
-            "content": "IDM returns the identity response to ACN SDK",
+            "abstract": "Agent-cards",
+            "content": "ACN SDK starts agent-card publication",
         },
         {
             "source": "ACN Agent",
-            "destination": "AgentGW",
+            "destination": "ARF",
             "timestamp": (now + timedelta(milliseconds=360)).isoformat(),
             "task_id": "topology-card",
             "protocol": "HTTP/2",
             "headers": "",
-            "abstract": "/arf/v1/agent-cards已转发到AgentGW",
-            "content": "ACN Agent forwards the agent card to AgentGW",
+            "abstract": "Agent-cards",
+            "content": "ACN Agent forwards the agent card to ARF",
         },
         {
-            "source": "AgentGW",
-            "destination": "ACN SDK",
+            "source": "ARF",
+            "destination": "IDM",
             "timestamp": (now + timedelta(milliseconds=480)).isoformat(),
             "task_id": "topology-card",
             "protocol": "HTTP/2",
             "headers": "",
-            "abstract": "/arf/v1/agent-cards响应返回ACN SDK",
-            "content": "AgentGW returns the agent-card response to ACN SDK",
+            "abstract": "vc-verifications",
+            "content": "ARF verifies the agent card with IDM",
+        },
+        {
+            "source": "ACN SDK",
+            "destination": "ACF",
+            "timestamp": (now + timedelta(milliseconds=600)).isoformat(),
+            "task_id": "topology-setup",
+            "protocol": "WebSocket",
+            "headers": "",
+            "abstract": "SETUP connection",
+            "content": "ACN SDK establishes ACF signaling connection",
+        },
+        {
+            "source": "ACN SDK",
+            "destination": "Relay",
+            "timestamp": (now + timedelta(milliseconds=720)).isoformat(),
+            "task_id": "topology-moq",
+            "protocol": "MoQ",
+            "headers": "",
+            "abstract": "MoQ Connection",
+            "content": "ACN SDK opens MoQ connection to Relay",
         },
     ]
 
@@ -1301,14 +2911,14 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                             "is_demo": True,
                         },
                     },
-                    "delay_after_seconds": 1.6,
+                    "delay_after_seconds": "stage",
                 },
-                # Step 2: ACN SDK -> ACN Agent -> AgentGW : Agent-cards
-                #         AgentGW -> IDM : vc-verifications
+                # Step 2: ACN SDK -> ACN Agent -> ARF : Agent-cards
+                #         ARF -> IDM : vc-verifications
                 {
                     "kind": "element",
                     "payload": {
-                        "element_id": "AgentGW",
+                        "element_id": "ARF",
                         "log_type": "PublishAgent",
                         "content": {
                             "agent_id": alpha_id,
@@ -1339,7 +2949,7 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                     "kind": "pipeline",
                     "payload": {
                         "source": "ACN Agent",
-                        "destination": "AgentGW",
+                        "destination": "ARF",
                         "task_id": "demo-alpha-card",
                         "protocol": "HTTP/2",
                         "headers": "",
@@ -1355,7 +2965,7 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                 {
                     "kind": "pipeline",
                     "payload": {
-                        "source": "AgentGW",
+                        "source": "ARF",
                         "destination": "IDM",
                         "task_id": "demo-alpha-card",
                         "protocol": "HTTP/2",
@@ -1368,13 +2978,14 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                             "is_demo": True,
                         },
                     },
-                    "delay_after_seconds": 1.6,
+                    "delay_after_seconds": "stage",
                 },
-                # Step 3: ACN SDK -> AgentGW : SETUP connection
+                # Step 3: ACN SDK -> ACF : SETUP connection
+                #         ACN SDK -> Relay : MoQ Connection
                 {
                     "kind": "element",
                     "payload": {
-                        "element_id": "AgentGW",
+                        "element_id": "ACF",
                         "log_type": "SetupConnection",
                         "content": {
                             "agent_id": alpha_id,
@@ -1387,7 +2998,7 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                     "kind": "pipeline",
                     "payload": {
                         "source": "ACN SDK",
-                        "destination": "AgentGW",
+                        "destination": "ACF",
                         "task_id": "demo-alpha-setup",
                         "protocol": "WebSocket",
                         "headers": "",
@@ -1399,7 +3010,37 @@ def build_full_system_test_events(stages: Optional[List[str]] = None) -> List[Di
                             "is_demo": True,
                         },
                     },
-                    "delay_after_seconds": 1.6,
+                    "delay_after_seconds": "stage",
+                },
+                {
+                    "kind": "element",
+                    "payload": {
+                        "element_id": "Relay",
+                        "log_type": "VideoStream",
+                        "content": {
+                            "agent_id": alpha_id,
+                            "agent_name": "Demo Agent Alpha",
+                            "is_demo": True,
+                        },
+                    },
+                },
+                {
+                    "kind": "pipeline",
+                    "payload": {
+                        "source": "ACN SDK",
+                        "destination": "Relay",
+                        "task_id": "demo-alpha-moq",
+                        "protocol": "MoQ",
+                        "headers": "",
+                        "abstract": "MoQ Connection",
+                        "content": {
+                            "agent_id": alpha_id,
+                            "agent_name": "Demo Agent Alpha",
+                            "name": "Demo Agent Alpha",
+                            "is_demo": True,
+                        },
+                    },
+                    "delay_after_seconds": "stage",
                 },
             ]
         )
@@ -1661,8 +3302,11 @@ async def run_full_system_test_demo(
 
             total_messages += 1
             if event_index < len(full_demo_events) - 1:
-                delay_seconds = max(
-                    0.05, float(event.get("delay_after_seconds", step_delay_seconds))
+                delay_value = event.get("delay_after_seconds", step_delay_seconds)
+                delay_seconds = (
+                    max(0.05, step_delay_seconds * 7.25)
+                    if delay_value == "stage"
+                    else max(0.05, float(delay_value))
                 )
                 await asyncio.sleep(delay_seconds)
 
@@ -1736,10 +3380,24 @@ async def call_arf_clear() -> Dict[str, Any]:
                 timeout=10.0,
             )
             print(f"[ARF] Clear response: {response.status_code}")
+            if response.status_code != 200:
+                response_body = response.text.strip()
+                detail = response_body[:500] if response_body else ""
+                add_log_entry(
+                    f"[ARF] Clear failed with HTTP {response.status_code}"
+                    + (f": {detail}" if detail else ""),
+                    "error",
+                )
+                return {
+                    "success": False,
+                    "status_code": response.status_code,
+                    "error": f"ARF clear failed with HTTP {response.status_code}",
+                    "detail": detail,
+                }
             return {
-                "success": response.status_code == 200,
+                "success": True,
                 "status_code": response.status_code,
-                "response": response.json() if response.status_code == 200 else None,
+                "response": response.json(),
             }
     except httpx.ConnectError as e:
         print(f"[ARF Error] Cannot connect to ARF service: {e}")
@@ -1848,24 +3506,38 @@ async def lifespan(app: FastAPI):
     print(f"API: http://0.0.0.0:9005")
     print(f"WebSocket: ws://0.0.0.0:9005/ws")
     print("=" * 60)
+    ensure_local_cache_db()
+    _prime_local_cache_from_runtime_state()
 
     # Start background task for agent updates
     task = asyncio.create_task(broadcast_agent_updates())
     global direct_video_demo_task
     await video_gateway.start()
-    _upsert_direct_video_track()
-    direct_video_demo_task = asyncio.create_task(_run_direct_video_demo())
+    await _start_direct_video_demo_if_needed()
 
     # Start MOQ video subscriber
     moq_task = None
     if MOQ_AVAILABLE:
         print("[MOQ] Starting video subscriber...")
-        moq_video_subscriber.set_callbacks(
-            on_frame_received=handle_moq_video_frame,
-            on_track_subscribed=on_moq_track_subscribed,
-        )
-        await moq_video_subscriber.start()
-        moq_task = moq_video_subscriber._connection_task
+        try:
+            moq_video_subscriber.set_callbacks(
+                on_frame_received=handle_moq_video_frame,
+                on_track_subscribed=on_moq_track_subscribed,
+            )
+            await moq_video_subscriber.start()
+            moq_task = moq_video_subscriber._connection_task
+        except OSError as exc:
+            add_log_entry(
+                f"[MOQ] Video subscriber disabled during startup: {exc}",
+                "warning",
+            )
+            print(f"[MOQ] Video subscriber disabled during startup: {exc}")
+        except Exception as exc:
+            add_log_entry(
+                f"[MOQ] Video subscriber startup failed: {exc}",
+                "warning",
+            )
+            print(f"[MOQ] Video subscriber startup failed: {exc}")
 
     yield
 
@@ -1876,13 +3548,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-    if direct_video_demo_task:
-        direct_video_demo_task.cancel()
-        try:
-            await direct_video_demo_task
-        except asyncio.CancelledError:
-            pass
-        direct_video_demo_task = None
+    await _stop_direct_video_demo()
     await video_gateway.stop()
 
     # Stop MOQ subscriber
@@ -1929,6 +3595,224 @@ async def health_check():
     }
 
 
+def _get_data_source_status() -> Dict[str, Any]:
+    settings = get_data_source_settings()
+    external_path = get_external_db_path()
+    external_exists = Path(external_path).exists()
+    local_exists = LOCAL_CACHE_DB_PATH.exists()
+    active_source = "external" if should_use_external_db() else "local"
+    if should_use_external_db() and not external_exists:
+        active_source = "local-fallback"
+
+    return {
+        "useExternalDb": bool(settings["useExternalDb"]),
+        "externalDbPath": external_path,
+        "externalDbExists": external_exists,
+        "localDbPath": get_local_cache_db_path(),
+        "localDbExists": local_exists,
+        "activeSource": active_source,
+    }
+
+
+@app.get("/api/settings/data-source")
+async def get_data_source_config():
+    """Return the current database source configuration."""
+    return {
+        "status": "success",
+        "config": _get_data_source_status(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/settings/data-source")
+async def update_data_source_config(request: Dict[str, Any]):
+    """Update the database source configuration."""
+    use_external = bool(request.get("useExternalDb", True))
+    external_path = str(request.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH).strip()
+    data_source_settings.update(
+        _save_data_source_settings(
+            {"useExternalDb": use_external, "externalDbPath": external_path}
+        )
+    )
+    ensure_local_cache_db()
+    _prime_local_cache_from_runtime_state()
+    dashboard = build_dashboard_snapshot()
+    tasks = build_control_tasks_snapshot()
+    payload = {
+        "config": _get_data_source_status(),
+        "dashboard": dashboard,
+        "tasks": tasks,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+    await manager.broadcast({"type": "TASKS_UPDATED", "payload": payload})
+    return {"status": "success", **payload}
+
+
+@app.get("/api/settings/direct-demo-camera")
+async def get_direct_demo_camera_config():
+    """Return direct demo camera settings and runtime status."""
+    return {
+        "status": "success",
+        "config": _get_direct_demo_camera_status(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/settings/direct-demo-camera")
+async def update_direct_demo_camera_config(request: Dict[str, Any]):
+    """Open or close the direct demo camera."""
+    enabled = bool(request.get("enabled", True))
+    direct_demo_settings.update(_save_direct_demo_settings({"enabled": enabled}))
+
+    if enabled:
+        await _start_direct_video_demo_if_needed()
+    else:
+        await _stop_direct_video_demo()
+
+    config = _get_direct_demo_camera_status()
+    return {
+        "status": "success",
+        "message": "Direct Demo Camera opened." if enabled else "Direct Demo Camera closed.",
+        "config": config,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/settings/virtual-agents")
+async def create_virtual_agent(request: Dict[str, Any]):
+    """Create a local virtual agent and publish it into the dashboard roster."""
+    payload = await add_virtual_agent(request)
+    return {
+        "status": "success",
+        "message": "Virtual agent added.",
+        **payload,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.get("/api/settings/certificates")
+async def get_certificates():
+    """Return the managed certificate list."""
+    return {
+        "status": "success",
+        "certificates": _list_certificates(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/settings/certificates/upload")
+async def upload_certificate(
+    file: Optional[UploadFile] = File(default=None),
+    filePath: Optional[str] = Form(default=None),
+):
+    """Upload a certificate from form-data file bytes or a server-local file path."""
+    upload_payload = await _read_certificate_upload(file, filePath)
+    cert_name = str(upload_payload["cert_name"]).strip()
+    cert_bytes = upload_payload["cert_bytes"]
+    upload_source = "browser-file" if file is not None and file.filename else "server-file-path"
+    add_log_entry(
+        f"[Cert Upload] Received upload request: certName={cert_name} source={upload_source}",
+        "info",
+    )
+
+    try:
+        decoded = _decode_x509_certificate(cert_bytes)
+        add_log_entry(
+            f"[Cert Upload] Decoded X.509 certificate: certName={cert_name} authority={decoded['authority']} validity={decoded['validity']}",
+            "info",
+        )
+    except ValueError as exc:
+        add_log_entry(
+            f"[Cert Upload] Failed to decode X.509 certificate certName={cert_name}: {exc}",
+            "error",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=f"Certificate is not a valid X.509 PEM or DER file: {exc}",
+        ) from exc
+
+    cert_id = _generate_cert_id()
+    add_log_entry(
+        f"[Cert Upload] Generated CertID for {cert_name}: {cert_id}",
+        "info",
+    )
+    try:
+        idm_response = await _forward_certificate_to_idm(cert_id, cert_name, cert_bytes)
+        certificate = _store_certificate_record(
+            cert_id,
+            cert_name,
+            decoded["authority"],
+            decoded["validity"],
+            cert_bytes,
+        )
+        add_log_entry(
+            f"[Cert Upload] Upload OK: certID={cert_id} certName={cert_name} saved to local cert database",
+            "info",
+        )
+    except Exception:
+        _delete_certificate_record(cert_id)
+        add_log_entry(
+            f"[Cert Upload] Upload failed and local cache cleared: certID={cert_id} certName={cert_name}",
+            "error",
+        )
+        raise
+
+    return {
+        "status": "success",
+        "message": "Upload OK",
+        "certificate": certificate,
+        "certificates": _list_certificates(),
+        "idmResponse": idm_response,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.delete("/api/settings/certificates/{cert_id}")
+async def delete_certificate(cert_id: str):
+    """Delete a managed certificate record and its stored file."""
+    normalized_cert_id = str(cert_id or "").strip()
+    if not normalized_cert_id:
+        raise HTTPException(status_code=400, detail="Certificate ID is required.")
+
+    conn = _connect_cert_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT cert_name
+            FROM certificates
+            WHERE cert_id = ?
+            """,
+            (normalized_cert_id,),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Certificate not found.")
+    finally:
+        conn.close()
+
+    cert_name = str(row["cert_name"]).strip()
+    add_log_entry(
+        f"[Cert Delete] Received delete request: certID={normalized_cert_id} certName={cert_name}",
+        "info",
+    )
+    idm_response = await _forward_certificate_delete_to_idm(normalized_cert_id, cert_name)
+    _delete_certificate_record(normalized_cert_id)
+    add_log_entry(
+        f"[Cert Delete] Delete success: certID={normalized_cert_id} certName={cert_name} removed from local cert database",
+        "info",
+    )
+
+    return {
+        "status": "success",
+        "message": "Delete success",
+        "certificates": _list_certificates(),
+        "idmResponse": idm_response,
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
 # Log buffer for frontend display
 log_buffer = []
 max_log_entries = 1000
@@ -1964,6 +3848,25 @@ def add_pipeline_log_entry(source: str, destination: str, abstract: str, content
     pipeline_log_buffer.append(entry)
     if len(pipeline_log_buffer) > max_pipeline_log_entries:
         pipeline_log_buffer.pop(0)
+
+
+def _set_message_flow_display_window(
+    ttl_seconds: Optional[Any] = None, active_seconds: Optional[Any] = None
+) -> None:
+    try:
+        ttl = float(ttl_seconds) if ttl_seconds is not None else float(MESSAGE_FLOW_TTL_SECONDS)
+    except (TypeError, ValueError):
+        ttl = float(MESSAGE_FLOW_TTL_SECONDS)
+
+    try:
+        active = float(active_seconds) if active_seconds is not None else ttl
+    except (TypeError, ValueError):
+        active = ttl
+
+    ttl = min(max(ttl, 0.8), 30.0)
+    active = min(max(active, 0.5), ttl)
+    message_flow_display_runtime["ttl_seconds"] = ttl
+    message_flow_display_runtime["active_seconds"] = active
 
 
 LOG_TIMESTAMP_PATTERNS = [
@@ -2140,6 +4043,7 @@ async def clear_environment():
     pipeline_log_buffer.clear()
     task_control_registry.clear()
     control_task_history.clear()
+    _reset_local_cache_state()
     agents = _merge_agent_sources()
     dashboard = build_dashboard_snapshot()
     tasks = build_control_tasks_snapshot()
@@ -2160,6 +4064,48 @@ async def clear_environment():
     }
 
 
+@app.get("/api/control/network-elements")
+async def get_network_element_controls():
+    """Return script-backed network element control status."""
+    return {
+        "elements": build_network_element_control_snapshot(),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+
+@app.post("/api/control/network-elements/{element_id}/{action}")
+async def control_network_element(element_id: str, action: str):
+    """Run start/stop/restart for a managed network element."""
+    if str(element_id).strip().lower() == "all":
+        result = await run_network_element_batch_action(action)
+    else:
+        result = await run_network_element_action(element_id, action)
+    await asyncio.sleep(0.8)
+
+    dashboard = build_dashboard_snapshot()
+    elements = build_network_element_control_snapshot()
+    success = int(result.get("exitCode", -1)) == 0
+    payload = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "result": result,
+        "results": result.get("results", [result]),
+        "elements": elements,
+        "dashboard": dashboard,
+    }
+
+    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+
+    return {
+        "success": success,
+        "message": (
+            f"{result['elementName']} {result['action']} completed."
+            if success
+            else f"{result['elementName']} {result['action']} completed with failures."
+        ),
+        **payload,
+    }
+
+
 @app.post("/api/control/test-messages/topology-demo")
 async def trigger_topology_test_demo(request: Request):
     """Inject a focused pipeline-log demo for the Topology Map."""
@@ -2169,6 +4115,10 @@ async def trigger_topology_test_demo(request: Request):
     body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
     rounds = body.get("rounds", 1)
     step_delay_seconds = body.get("step_delay_seconds", 0.12)
+    _set_message_flow_display_window(
+        body.get("display_ttl_seconds"),
+        body.get("display_active_seconds"),
+    )
 
     try:
         result = await run_topology_test_demo(
@@ -2232,6 +4182,10 @@ async def trigger_full_system_test_demo(request: Request):
     rounds = body.get("rounds", 1)
     step_delay_seconds = body.get("step_delay_seconds", 0.22)
     stages = body.get("stages")
+    _set_message_flow_display_window(
+        body.get("display_ttl_seconds"),
+        body.get("display_active_seconds"),
+    )
 
     try:
         result = await run_full_system_test_demo(
@@ -2288,17 +4242,16 @@ async def dispatch_control_task(request: Request):
     agent_names = _task_agent_name_lookup()
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.executemany(
-            "INSERT INTO tasks (agent_id, task_id, task_description) VALUES (?, ?, ?)",
-            [
-                (agent_id, task_id, task_description)
-                for agent_id in normalized_agent_ids
-            ],
-        )
-        conn.commit()
-        conn.close()
+        for agent_id in normalized_agent_ids:
+            _insert_task_record(
+                agent_id,
+                task_id,
+                task_description,
+                task_name=task_name,
+                task_type=task_type,
+                created_at=now,
+                updated_at=now,
+            )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to dispatch task: {e}")
 
@@ -2317,16 +4270,17 @@ async def dispatch_control_task(request: Request):
     }
 
     for agent_id in normalized_agent_ids:
-        cache_entry = agent_status_cache.setdefault(
+        cache_entry = _ensure_agent_cache_entry(
             agent_id,
-            {
-                "agent_name": agent_names.get(agent_id, agent_id),
-                "logs": [],
-            },
+            agent_name=agent_names.get(agent_id, agent_id),
+        )
+        _sync_agent_timeline(
+            cache_entry,
+            status="online",
+            timestamp=now,
         )
         cache_entry["work_status"] = "working"
         cache_entry["current_task"] = task_description
-        cache_entry["last_update"] = now
         cache_entry.setdefault("logs", []).append(
             {
                 "time": now,
@@ -2336,6 +4290,19 @@ async def dispatch_control_task(request: Request):
         )
         if len(cache_entry["logs"]) > 10:
             cache_entry["logs"] = cache_entry["logs"][-10:]
+        _upsert_local_agent(
+            agent_id,
+            agent_name=cache_entry.get("agent_name"),
+            agent_status=cache_entry.get("agent_status", "online"),
+            work_status=cache_entry.get("work_status"),
+            current_task=cache_entry.get("current_task"),
+            agent_capability=cache_entry.get("agent_capability")
+            if isinstance(cache_entry.get("agent_capability"), list)
+            else None,
+            last_update=now,
+            launch_time=cache_entry.get("launch_time"),
+            offline_time=cache_entry.get("offline_time"),
+        )
 
     add_log_entry(
         f"[Control] Dispatched task {task_id} ({task_type}) to {len(normalized_agent_ids)} agents",
@@ -2384,11 +4351,7 @@ async def stop_control_task(task_id: str):
     ]
 
     try:
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
-        conn.commit()
-        conn.close()
+        _delete_task_records(task_id)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to stop task: {e}")
 
@@ -2431,13 +4394,30 @@ async def stop_control_task(task_id: str):
         if not cache_entry:
             continue
 
-        cache_entry["last_update"] = now
+        _sync_agent_timeline(
+            cache_entry,
+            status=cache_entry.get("agent_status", "online"),
+            timestamp=now,
+        )
         if agent_id in remaining_by_agent:
             cache_entry["work_status"] = "working"
             cache_entry["current_task"] = remaining_by_agent[agent_id]
         else:
             cache_entry["work_status"] = "idle"
             cache_entry["current_task"] = ""
+        _upsert_local_agent(
+            agent_id,
+            agent_name=cache_entry.get("agent_name"),
+            agent_status=cache_entry.get("agent_status", "online"),
+            work_status=cache_entry.get("work_status"),
+            current_task=cache_entry.get("current_task"),
+            agent_capability=cache_entry.get("agent_capability")
+            if isinstance(cache_entry.get("agent_capability"), list)
+            else None,
+            last_update=now,
+            launch_time=cache_entry.get("launch_time"),
+            offline_time=cache_entry.get("offline_time"),
+        )
 
     add_log_entry(f"[Control] Stopped task {task_id}", "warning")
 
@@ -3149,6 +5129,13 @@ async def receive_pipeline_log(request: Dict[str, Any]):
             timestamp=log_message["payload"]["timestamp"],
             task_id=log_message["payload"]["task_id"],
         )
+        _record_local_log(
+            "pipeline",
+            log_message["payload"]["abstract"] or log_message["payload"]["content"],
+            body,
+            source_name=body.get("source"),
+            task_id=body.get("task_id"),
+        )
 
         # Broadcast to all connected WebSocket clients
         await manager.broadcast(log_message)
@@ -3169,6 +5156,9 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                 agent_id = content.get("agent_id", "")
                 agent_name = content.get("agent_name", content.get("name", ""))
                 task_id = body.get("task_id", "")
+                claim_names = _claim_agent_names_from_content(content, agent_id)
+                if claim_names and (_is_identifier_like_name(agent_name) or not agent_name):
+                    agent_name = claim_names[0]
 
                 # Extract agent_id for internal forwarded messages
                 if not agent_id and abstract in [
@@ -3222,34 +5212,26 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                     timestamp = body.get("timestamp", datetime.utcnow().isoformat())
                     is_demo = bool(content.get("is_demo"))
 
-                    # Update agent status cache
-                    if agent_id not in agent_status_cache:
-                        agent_status_cache[agent_id] = {
-                            "agent_id": agent_id,
-                            "agent_name": agent_name or agent_id.split(":")[-1][:20],
-                            "work_status": work_status,
-                            "current_task": task_desc,
-                            "logs": [],
-                            "agent_status": "online",
-                            "agent_capability": [],
-                            "last_update": timestamp,
-                            "is_demo": is_demo,
-                        }
-                    else:
-                        agent_status_cache[agent_id]["work_status"] = work_status
-                        agent_status_cache[agent_id]["current_task"] = task_desc
-                        if agent_name:
-                            agent_status_cache[agent_id]["agent_name"] = agent_name
-                        agent_status_cache[agent_id]["last_update"] = timestamp
-                        if is_demo:
-                            agent_status_cache[agent_id]["is_demo"] = True
+                    cache_entry = _ensure_agent_cache_entry(
+                        agent_id,
+                        agent_name=agent_name or agent_id.split(":")[-1][:20],
+                    )
+                    _sync_agent_timeline(
+                        cache_entry,
+                        status="online",
+                        timestamp=timestamp,
+                    )
+                    cache_entry["work_status"] = work_status
+                    cache_entry["current_task"] = task_desc
+                    if is_demo:
+                        cache_entry["is_demo"] = True
 
                     # Broadcast status update
                     status_message = {
                         "type": "AGENT_STATUS_UPDATE",
                         "payload": {
                             "agent_id": agent_id,
-                            "agent_name": agent_status_cache[agent_id]["agent_name"],
+                            "agent_name": cache_entry["agent_name"],
                             "work_status": work_status,
                             "current_task": task_desc,
                             "log_type": abstract,
@@ -3260,6 +5242,38 @@ async def receive_pipeline_log(request: Dict[str, Any]):
                     }
                     print(
                         f"[Pipeline Status] {abstract} -> Agent: {agent_id[:30]}... | Status: {work_status}"
+                    )
+                    _upsert_local_agent(
+                        agent_id,
+                        agent_name=cache_entry["agent_name"],
+                        agent_status=cache_entry.get("agent_status", "online"),
+                        work_status=work_status,
+                        current_task=task_desc,
+                        agent_capability=cache_entry.get("agent_capability")
+                        if isinstance(cache_entry.get("agent_capability"), list)
+                        else None,
+                        last_update=timestamp,
+                        launch_time=cache_entry.get("launch_time"),
+                        offline_time=cache_entry.get("offline_time"),
+                    )
+                    if task_id:
+                        _upsert_local_task(
+                            task_id,
+                            agent_id,
+                            task_description=task_desc or abstract,
+                            task_name=task_desc or abstract,
+                            task_type=_extract_task_type(task_desc or abstract) or "General",
+                            status="processing",
+                            created_at=timestamp,
+                            updated_at=timestamp,
+                        )
+                    _record_local_log(
+                        "pipeline",
+                        abstract or task_desc,
+                        body,
+                        source_name=body.get("source"),
+                        agent_id=agent_id,
+                        task_id=task_id,
                     )
                     await manager.broadcast(status_message)
 
@@ -3334,6 +5348,7 @@ def get_work_status_from_abstract(abstract: str) -> tuple:
         "Publish MoQ track": ("tracking", "Publishing video track"),
         "Announce MoQ published track": ("tracking", "Video track published"),
         "Send MoQ object": ("tracking", "Streaming video data"),
+        "MoQ Connection": ("tracking", "Setting up MoQ relay connection"),
         "WebSocket setup handshake": ("online", "Setting up connection"),
     }
     return status_map.get(abstract, ("idle", abstract))
@@ -3357,6 +5372,9 @@ async def receive_element_log(request: Dict[str, Any]):
         # Extract agent_id from content
         agent_id = content.get("agent_id", "")
         agent_name = content.get("agent_name", "")
+        claim_names = _claim_agent_names_from_content(content, agent_id)
+        if claim_names and (_is_identifier_like_name(agent_name) or not agent_name):
+            agent_name = claim_names[0]
         is_demo = bool(content.get("is_demo"))
 
         # Determine work status based on log_type
@@ -3375,42 +5393,68 @@ async def receive_element_log(request: Dict[str, Any]):
 
         # Add to log buffer
         add_log_entry(f"[{element_id}] {agent_id}: {log_type} - {task_desc}", "info")
+        _record_local_log(
+            "element",
+            f"{log_type}: {task_desc}",
+            body,
+            source_name=element_id,
+            agent_id=agent_id,
+            task_id=body.get("task_id") or content.get("task_id"),
+        )
 
         # Update agent status cache
         if agent_id:
-            if agent_id not in agent_status_cache:
-                agent_status_cache[agent_id] = {
-                    "agent_id": agent_id,
-                    "agent_name": agent_name or agent_id.split(":")[-1][:20],
-                    "work_status": work_status,
-                    "current_task": task_desc,
-                    "logs": [],
-                    "agent_status": "online",
-                    "agent_capability": content.get("agent_capability", [])
+            cache_entry = _ensure_agent_cache_entry(
+                agent_id,
+                agent_name=agent_name or agent_id.split(":")[-1][:20],
+            )
+            if content.get("agent_capability") and not cache_entry.get("agent_capability"):
+                cache_entry["agent_capability"] = (
+                    content.get("agent_capability", [])
                     if isinstance(content.get("agent_capability"), list)
                     else [content.get("agent_capability", "")]
-                    if content.get("agent_capability")
-                    else [],
-                    "last_update": timestamp,
-                    "is_demo": is_demo,
-                }
-            else:
-                # Update existing agent status
-                agent_status_cache[agent_id]["work_status"] = work_status
-                agent_status_cache[agent_id]["current_task"] = task_desc
-                if agent_name:
-                    agent_status_cache[agent_id]["agent_name"] = agent_name
-                agent_status_cache[agent_id]["last_update"] = timestamp
-                if is_demo:
-                    agent_status_cache[agent_id]["is_demo"] = True
+                )
+            _sync_agent_timeline(
+                cache_entry,
+                status="online",
+                timestamp=timestamp,
+            )
+            cache_entry["work_status"] = work_status
+            cache_entry["current_task"] = task_desc
+            if is_demo:
+                cache_entry["is_demo"] = True
+
+            _upsert_local_agent(
+                agent_id,
+                agent_name=cache_entry["agent_name"],
+                agent_status=cache_entry.get("agent_status", "online"),
+                work_status=work_status,
+                current_task=task_desc,
+                agent_capability=cache_entry.get("agent_capability")
+                if isinstance(cache_entry.get("agent_capability"), list)
+                else None,
+                last_update=timestamp,
+                launch_time=cache_entry.get("launch_time"),
+                offline_time=cache_entry.get("offline_time"),
+            )
+            element_task_id = str(body.get("task_id") or content.get("task_id") or "").strip()
+            if element_task_id:
+                _upsert_local_task(
+                    element_task_id,
+                    agent_id,
+                    task_description=task_desc,
+                    task_name=task_desc,
+                    task_type=log_type,
+                    status="processing",
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
 
             # Add log entry
-            agent_status_cache[agent_id]["logs"].append(log_entry)
+            cache_entry["logs"].append(log_entry)
             # Keep only last 10 logs
-            if len(agent_status_cache[agent_id]["logs"]) > 10:
-                agent_status_cache[agent_id]["logs"] = agent_status_cache[agent_id][
-                    "logs"
-                ][-10:]
+            if len(cache_entry["logs"]) > 10:
+                cache_entry["logs"] = cache_entry["logs"][-10:]
 
         # Create update message
         update_message = {
@@ -3521,6 +5565,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         pipeline_log_buffer.clear()
                         task_control_registry.clear()
                         control_task_history.clear()
+                        _reset_local_cache_state()
                         # Get fresh agent list after clear
                         agents = _merge_agent_sources()
 

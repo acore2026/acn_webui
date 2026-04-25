@@ -2,15 +2,35 @@ import { Handle, Node, NodeProps, Position } from '@xyflow/react';
 import { MessageFlowNodeModel } from '../types';
 import { BotIcon, ControlIcon, NetworkIcon, SdkIcon } from './icons';
 
-type SystemFlowNodeData = Record<string, unknown> & MessageFlowNodeModel;
+type FlowHighlightRole = 'source' | 'target' | 'both' | null;
+
+type SystemFlowNodeData = Record<string, unknown> &
+  MessageFlowNodeModel & {
+    highlightRole?: FlowHighlightRole;
+    activeCount?: number;
+    compact?: boolean;
+  };
 
 export type SystemFlowNodeModelData = Node<SystemFlowNodeData, 'systemFlow'>;
 
 const iconMap = {
   'ACN Agent': BotIcon,
   AgentGW: NetworkIcon,
+  ARF: NetworkIcon,
+  ACF: NetworkIcon,
+  Relay: NetworkIcon,
   IDM: ControlIcon,
   'ACN SDK': SdkIcon
+};
+
+const toneMap = {
+  'ACN Agent': 'agent',
+  'ACN SDK': 'sdk',
+  IDM: 'identity',
+  ARF: 'repository',
+  ACF: 'control',
+  Relay: 'relay',
+  AgentGW: 'gateway'
 };
 
 const statusStyles = {
@@ -30,11 +50,26 @@ const hiddenHandleClass =
 export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModelData>) => {
   const Icon = iconMap[data.name as keyof typeof iconMap] ?? NetworkIcon;
   const status = statusStyles[data.status];
+  const highlightRole = data.highlightRole ?? null;
+  const isHighlighted = highlightRole !== null;
+  const compact = Boolean(data.compact);
+  const tone = toneMap[data.name as keyof typeof toneMap] ?? 'default';
+  const highlightClass =
+    highlightRole === 'both'
+      ? 'theme-node-card-active-both'
+      : highlightRole === 'source'
+        ? 'theme-node-card-active-source'
+        : highlightRole === 'target'
+          ? 'theme-node-card-active-target'
+          : '';
 
   return (
     <div
       className={[
-        'theme-node-card min-w-[220px] rounded-3xl border px-5 py-5 shadow-panel backdrop-blur',
+        'theme-node-card rounded-3xl border shadow-panel backdrop-blur',
+        `theme-flow-node-${tone}`,
+        compact ? 'min-w-[150px] px-3 py-3' : 'min-w-[220px] px-5 py-5',
+        highlightClass,
         selected ? 'border-cyan-300/50 ring-1 ring-cyan-300/40' : ''
       ].join(' ')}
     >
@@ -88,11 +123,25 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
         style={{ top: '62%' }}
       />
       <Handle
+        id="left-top-out"
+        type="source"
+        position={Position.Left}
+        className={hiddenHandleClass}
+        style={{ top: '28%' }}
+      />
+      <Handle
         id="left-mid-out"
         type="source"
         position={Position.Left}
         className={hiddenHandleClass}
         style={{ top: '50%' }}
+      />
+      <Handle
+        id="left-bottom-out"
+        type="source"
+        position={Position.Left}
+        className={hiddenHandleClass}
+        style={{ top: '72%' }}
       />
       <Handle
         id="right-out"
@@ -102,11 +151,25 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
         style={{ top: '62%' }}
       />
       <Handle
+        id="right-top-out"
+        type="source"
+        position={Position.Right}
+        className={hiddenHandleClass}
+        style={{ top: '28%' }}
+      />
+      <Handle
         id="right-mid-out"
         type="source"
         position={Position.Right}
         className={hiddenHandleClass}
         style={{ top: '50%' }}
+      />
+      <Handle
+        id="right-bottom-out"
+        type="source"
+        position={Position.Right}
+        className={hiddenHandleClass}
+        style={{ top: '72%' }}
       />
       <Handle
         id="top-out"
@@ -124,23 +187,60 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
       />
 
       <div className="flex items-start justify-between gap-3">
-        <div className="theme-accent-icon flex h-12 w-12 items-center justify-center rounded-2xl">
-          <Icon className="h-6 w-6" />
+        <div
+          className={[
+            'theme-accent-icon flex items-center justify-center rounded-2xl transition',
+            compact ? 'h-9 w-9' : 'h-12 w-12',
+            isHighlighted ? 'scale-[1.04] shadow-[0_0_0_4px_rgba(34,211,238,0.12)]' : ''
+          ].join(' ')}
+        >
+          <Icon className={compact ? 'h-4 w-4' : 'h-6 w-6'} />
         </div>
-        <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.2em] ${status.pill}`}>
-          <span className={`h-2 w-2 rounded-full ${status.dot}`} />
+        <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 font-medium uppercase tracking-[0.2em] ${compact ? 'text-[9px]' : 'text-[11px]'} ${status.pill}`}>
+          <span className={`${compact ? 'h-1.5 w-1.5' : 'h-2 w-2'} rounded-full ${status.dot}`} />
           {data.status}
         </span>
       </div>
 
-      <div className="mt-4">
-        <h4 className="theme-title text-lg font-semibold">{data.name}</h4>
-        <p className="theme-soft mt-1 text-sm">
-          {data.name === 'ACN Agent' && 'Execution runtime and agent-side requests'}
-          {data.name === 'AgentGW' && 'ARF and ACF coordination hub'}
-          {data.name === 'IDM' && 'Identity verification service'}
-          {data.name === 'ACN SDK' && 'Client-side request origin and response consumer'}
-        </p>
+      <div className={compact ? 'mt-3' : 'mt-4'}>
+        <div className="flex items-center justify-between gap-3">
+          <h4 className={`theme-title font-semibold ${compact ? 'text-sm tracking-[0.16em]' : 'text-lg'}`}>
+            {data.name}
+          </h4>
+          {isHighlighted ? (
+            <span
+              className={[
+                'rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]',
+                highlightRole === 'both'
+                  ? 'theme-badge-cyan'
+                  : highlightRole === 'source'
+                    ? 'theme-badge-amber'
+                    : 'theme-badge-emerald'
+              ].join(' ')}
+            >
+              {highlightRole === 'both'
+                ? 'in/out'
+                : highlightRole === 'source'
+                  ? 'out'
+                  : 'in'}
+            </span>
+          ) : null}
+        </div>
+        {compact ? (
+          <div className="theme-flow-node-code mt-2">
+            {data.name === 'ARF' && 'repository'}
+            {data.name === 'ACF' && 'control'}
+            {data.name === 'Relay' && 'transport'}
+          </div>
+        ) : null}
+        {!compact ? (
+          <p className="theme-soft mt-1 text-sm">
+            {data.name === 'ACN Agent' && 'Execution runtime and agent-side requests'}
+            {data.name === 'AgentGW' && 'ARF and ACF coordination hub'}
+            {data.name === 'IDM' && 'Identity verification service'}
+            {data.name === 'ACN SDK' && 'Client-side request origin and response consumer'}
+          </p>
+        ) : null}
       </div>
     </div>
   );

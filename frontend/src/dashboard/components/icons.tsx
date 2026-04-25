@@ -68,6 +68,21 @@ export const SettingsIcon = ({ className = '', ...props }: IconProps) => (
   </svg>
 );
 
+export const DatabaseIcon = ({ className = '', ...props }: IconProps) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    className={`${iconClass} ${className}`}
+    {...props}
+  >
+    <ellipse cx="12" cy="6" rx="7" ry="3" />
+    <path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6" />
+    <path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6" />
+  </svg>
+);
+
 export const ControlIcon = ({ className = '', ...props }: IconProps) => (
   <svg
     viewBox="0 0 24 24"
@@ -109,6 +124,20 @@ export const SignalIcon = ({ className = '', ...props }: IconProps) => (
     <path d="M10 19V5" />
     <path d="M15 19v-8" />
     <path d="M20 19v-4" />
+  </svg>
+);
+
+export const PlayIcon = ({ className = '', ...props }: IconProps) => (
+  <svg
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="1.8"
+    className={`${iconClass} ${className}`}
+    {...props}
+  >
+    <circle cx="12" cy="12" r="9" />
+    <path d="m10 8 6 4-6 4V8Z" fill="currentColor" stroke="none" />
   </svg>
 );
 

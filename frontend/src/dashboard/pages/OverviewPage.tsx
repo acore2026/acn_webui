@@ -9,26 +9,12 @@ interface OverviewPageProps {
   data: DashboardMockData;
   language: LanguageMode;
   onMetricSelect: (metricId: string) => void;
-  testFlowBusy: boolean;
-  testFlowPaused: boolean;
-  testFlowMessage: string | null;
-  testFlowSpeed: number;
-  onTestFlowSpeedChange: (speed: number) => void;
-  onToggleTestFlowPause: () => Promise<void>;
-  onRunTestFlow: () => Promise<void>;
 }
 
 export const OverviewPage = ({
   data,
   language,
-  onMetricSelect,
-  testFlowBusy,
-  testFlowPaused,
-  testFlowMessage,
-  testFlowSpeed,
-  onTestFlowSpeedChange,
-  onToggleTestFlowPause,
-  onRunTestFlow
+  onMetricSelect
 }: OverviewPageProps) => {
   return (
     <div className="flex min-h-[calc(100vh-10rem)] flex-col gap-6">
@@ -43,13 +29,6 @@ export const OverviewPage = ({
           nodes={data.messageFlow.nodes}
           edges={data.messageFlow.edges}
           language={language}
-          testFlowBusy={testFlowBusy}
-          testFlowPaused={testFlowPaused}
-          testFlowMessage={testFlowMessage}
-          testFlowSpeed={testFlowSpeed}
-          onTestFlowSpeedChange={onTestFlowSpeedChange}
-          onToggleTestFlowPause={onToggleTestFlowPause}
-          onRunTestFlow={onRunTestFlow}
         />
       </div>
       <div className="h-[360px]">
