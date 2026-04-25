@@ -367,7 +367,6 @@ export const ControlPage = ({
                           ) : null}
                         </div>
                         <p className="theme-copy mt-2 text-sm leading-6">{element.description}</p>
-                        <p className="theme-muted mt-2 break-all text-xs">{element.scriptPath}</p>
                       </div>
 
                       <div className="flex flex-wrap gap-2">
@@ -407,24 +406,10 @@ export const ControlPage = ({
                       </div>
                     </div>
 
-                    <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                    <div className="mt-4">
                       <div className="theme-card-muted p-4">
                         <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '状态摘要' : 'Status Summary'}</p>
                         <p className="theme-copy mt-2 text-sm leading-6">{element.summary}</p>
-                      </div>
-                      <div className="theme-card-muted p-4">
-                        <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '端点' : 'Endpoints'}</p>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {element.components.length > 0 ? (
-                            element.components.map((component) => (
-                              <span key={`${element.id}-${component.id}`} className="theme-chip px-3 py-1 text-xs">
-                                {component.name}:{component.port}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="theme-soft text-sm">{isZh ? '无端点状态' : 'No endpoint status'}</span>
-                          )}
-                        </div>
                       </div>
                     </div>
                   </article>

@@ -66,9 +66,9 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
   return (
     <div
       className={[
-        'theme-node-card rounded-3xl border shadow-panel backdrop-blur',
+        'theme-node-card flex flex-col rounded-3xl border shadow-panel backdrop-blur',
         `theme-flow-node-${tone}`,
-        compact ? 'min-w-[150px] px-3 py-3' : 'min-w-[220px] px-5 py-5',
+        compact ? 'min-w-[190px] gap-4 p-5' : 'min-w-[280px] gap-4 p-6',
         highlightClass,
         selected ? 'border-cyan-300/50 ring-1 ring-cyan-300/40' : ''
       ].join(' ')}
@@ -186,60 +186,43 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
         style={{ left: '38%' }}
       />
 
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-4">
         <div
           className={[
             'theme-accent-icon flex items-center justify-center rounded-2xl transition',
-            compact ? 'h-9 w-9' : 'h-12 w-12',
+            compact ? 'h-12 w-12' : 'h-16 w-16',
             isHighlighted ? 'scale-[1.04] shadow-[0_0_0_4px_rgba(34,211,238,0.12)]' : ''
           ].join(' ')}
         >
-          <Icon className={compact ? 'h-4 w-4' : 'h-6 w-6'} />
+          <Icon className={compact ? 'h-6 w-6' : 'h-8 w-8'} />
         </div>
-        <span className={`inline-flex items-center gap-2 rounded-full border px-2.5 py-1 font-medium uppercase tracking-[0.2em] ${compact ? 'text-[9px]' : 'text-[11px]'} ${status.pill}`}>
+        <span className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 font-semibold uppercase tracking-[0.2em] ${compact ? 'text-[10px]' : 'text-xs'} ${status.pill}`}>
           <span className={`${compact ? 'h-1.5 w-1.5' : 'h-2 w-2'} rounded-full ${status.dot}`} />
           {data.status}
         </span>
       </div>
 
-      <div className={compact ? 'mt-3' : 'mt-4'}>
-        <div className="flex items-center justify-between gap-3">
-          <h4 className={`theme-title font-semibold ${compact ? 'text-sm tracking-[0.16em]' : 'text-lg'}`}>
-            {data.name}
-          </h4>
-          {isHighlighted ? (
-            <span
-              className={[
-                'rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]',
-                highlightRole === 'both'
-                  ? 'theme-badge-cyan'
-                  : highlightRole === 'source'
-                    ? 'theme-badge-amber'
-                    : 'theme-badge-emerald'
-              ].join(' ')}
-            >
-              {highlightRole === 'both'
-                ? 'in/out'
+      <div className="flex flex-col gap-1">
+        <h4 className={`theme-title font-medium leading-tight ${compact ? 'text-2xl tracking-[0.08em]' : 'text-3xl tracking-[0.02em]'}`}>
+          {data.name}
+        </h4>
+        {isHighlighted ? (
+          <span
+            className={[
+              'mt-2 w-fit rounded-full border px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.18em]',
+              highlightRole === 'both'
+                ? 'theme-badge-cyan'
                 : highlightRole === 'source'
-                  ? 'out'
-                  : 'in'}
-            </span>
-          ) : null}
-        </div>
-        {compact ? (
-          <div className="theme-flow-node-code mt-2">
-            {data.name === 'ARF' && 'repository'}
-            {data.name === 'ACF' && 'control'}
-            {data.name === 'Relay' && 'transport'}
-          </div>
-        ) : null}
-        {!compact ? (
-          <p className="theme-soft mt-1 text-sm">
-            {data.name === 'ACN Agent' && 'Execution runtime and agent-side requests'}
-            {data.name === 'AgentGW' && 'ARF and ACF coordination hub'}
-            {data.name === 'IDM' && 'Identity verification service'}
-            {data.name === 'ACN SDK' && 'Client-side request origin and response consumer'}
-          </p>
+                  ? 'theme-badge-amber'
+                  : 'theme-badge-emerald'
+            ].join(' ')}
+          >
+            {highlightRole === 'both'
+              ? 'in/out'
+              : highlightRole === 'source'
+                ? 'out'
+                : 'in'}
+          </span>
         ) : null}
       </div>
     </div>

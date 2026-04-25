@@ -145,7 +145,7 @@ FLOW_NODE_LAYOUTS = {
     "ARF": {"x": 760, "y": 130},
     "ACF": {"x": 760, "y": 300},
     "Relay": {"x": 760, "y": 470},
-    "ACN SDK": {"x": 250, "y": 610},
+    "ACN SDK": {"x": 250, "y": 800},
 }
 
 MESSAGE_FLOW_TTL_SECONDS = 1
@@ -3818,6 +3818,7 @@ log_buffer = []
 max_log_entries = 1000
 pipeline_log_buffer = []
 max_pipeline_log_entries = 200
+network_element_log_cutoffs: Dict[str, int] = {}
 task_control_registry: Dict[str, Dict[str, Any]] = {}
 control_task_history: List[Dict[str, Any]] = []
 max_control_task_history = 50
@@ -3920,11 +3921,43 @@ def _parse_log_level(line: str) -> str:
     return "info"
 
 
+def _current_log_offset(file_path: Path) -> int:
+    try:
+        return file_path.stat().st_size if file_path.exists() and file_path.is_file() else 0
+    except OSError:
+        return 0
+
+
+def _snapshot_network_element_log_cutoffs() -> Dict[str, int]:
+    cutoffs: Dict[str, int] = {}
+
+    for source in NETWORK_ELEMENT_LOG_SOURCES:
+        path = source["path"]
+        try:
+            if source["mode"] == "file":
+                if path.exists() and path.is_file():
+                    cutoffs[str(path)] = _current_log_offset(path)
+            else:
+                for file_path in _list_log_files(path):
+                    cutoffs[str(file_path)] = _current_log_offset(file_path)
+        except Exception as exc:
+            add_log_entry(
+                f"[Clear] Failed to snapshot log cutoff for {source['name']}: {exc}",
+                "warning",
+            )
+
+    return cutoffs
+
+
 def _tail_log_entries(file_path: Path, limit: int) -> List[Dict[str, Any]]:
     if limit <= 0:
         return []
 
+    start_offset = network_element_log_cutoffs.get(str(file_path), 0)
     with file_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        if start_offset > 0:
+            current_size = _current_log_offset(file_path)
+            handle.seek(start_offset if current_size >= start_offset else 0)
         lines = list(deque(handle, maxlen=limit))
 
     entries = []
@@ -4041,6 +4074,8 @@ async def clear_environment():
     agent_status_cache.clear()
     task_agent_mapping.clear()
     pipeline_log_buffer.clear()
+    network_element_log_cutoffs.clear()
+    network_element_log_cutoffs.update(_snapshot_network_element_log_cutoffs())
     task_control_registry.clear()
     control_task_history.clear()
     _reset_local_cache_state()

@@ -42,7 +42,7 @@ const triangleLayout: Record<string, { x: number; y: number }> = {
   ACF: { x: 820, y: 300 },
   Relay: { x: 820, y: 480 },
   AgentGW: { x: 820, y: 300 },
-  'ACN SDK': { x: 260, y: 610 }
+  'ACN SDK': { x: 260, y: 800 }
 };
 
 const gatewayNodes = new Set(['ARF', 'ACF', 'Relay', 'AgentGW']);
@@ -379,7 +379,7 @@ export const TopologyMap = ({
       <header className="flex flex-wrap items-center justify-between gap-4 border-b border-[color:var(--border-soft)] px-6 py-5">
         <div>
           <p className="panel-eyebrow">{isZh ? '拓扑图' : 'Topology Map'}</p>
-          <h2 className="theme-title mt-2 text-2xl font-semibold">{isZh ? 'React Flow 消息路径' : 'React Flow Message Paths'}</h2>
+          <h2 className="theme-title mt-2 text-2xl font-semibold">{isZh ? 'ACN 网络拓扑' : 'Topology of ACN Network'}</h2>
           <p className="theme-soft mt-1 text-sm">
             {isZh
               ? '将最近收到的 pipeline 日志聚合为 ACN Agent、ARF、ACF、Relay、IDM 与 ACN SDK 之间的实时消息路径。'
