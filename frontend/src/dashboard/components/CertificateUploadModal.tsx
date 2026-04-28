@@ -116,8 +116,16 @@ export const CertificateUploadModal = ({
               type="file"
               onChange={handleFileChange}
               disabled={busy}
-              className="theme-copy mt-3 block w-full cursor-pointer text-sm file:mr-4 file:rounded-xl file:border-0 file:bg-[color:var(--surface-strong)] file:px-4 file:py-2 file:text-sm file:font-medium file:text-[color:var(--text-main)]"
+              className="hidden"
             />
+            <button
+              type="button"
+              className="theme-top-button mt-3 px-4 py-2"
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+            >
+              {copy.selectFile}
+            </button>
             <p className="theme-soft mt-3 text-sm">
               {copy.selectedFile}: {selectedFile?.name || '-'}
             </p>

@@ -2,14 +2,13 @@ import { FormEvent, useCallback, useEffect, useState } from 'react';
 import { CertificateUploadModal } from '../components/CertificateUploadModal';
 import { SectionCard } from '../components/SectionCard';
 import { LanguageMode, shellCopy } from '../i18n';
-import { CertificateRecord, DatabaseSourceConfig } from '../types';
+import { CertificateRecord } from '../types';
 
 interface SettingsPageProps {
-  dataSourceConfig: DatabaseSourceConfig | null;
   language: LanguageMode;
 }
 
-export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) => {
+export const SettingsPage = ({ language }: SettingsPageProps) => {
   const isZh = language === 'zh';
   const certCopy = shellCopy[language].certificates;
   const virtualAgentCopy = shellCopy[language].virtualAgent;
@@ -56,32 +55,14 @@ export const SettingsPage = ({ dataSourceConfig, language }: SettingsPageProps) 
       title: isZh ? '数据源' : 'Data Source',
       items: isZh
         ? [
-            dataSourceConfig?.useExternalDb
-              ? '当前配置为读取外部 SQLite 数据库。'
-              : '当前配置为使用 WebUI 本地缓存数据库。',
-            `当前生效来源：${
-              dataSourceConfig?.activeSource === 'external'
-                ? '外部数据库'
-                : dataSourceConfig?.activeSource === 'local'
-                  ? '本地缓存'
-                  : '本地兜底'
-            }`,
-            `外部数据库路径：${dataSourceConfig?.externalDbPath || '未加载'}`,
-            `本地缓存路径：${dataSourceConfig?.localDbPath || '未加载'}`
+            '当前仅使用 WebUI 本地缓存数据库。',
+            'Agent 和任务状态由 /acn/v3/element-logs 消息维护。',
+            'Control Clear 会清空 WebUI 本地 agents、tasks 和 ingested_logs。'
           ]
         : [
-            dataSourceConfig?.useExternalDb
-              ? 'The dashboard is currently configured to read an external SQLite database.'
-              : 'The dashboard is currently configured to use the WebUI local cache database.',
-            `Current active source: ${
-              dataSourceConfig?.activeSource === 'external'
-                ? 'External DB'
-                : dataSourceConfig?.activeSource === 'local'
-                  ? 'Local cache'
-                  : 'Local fallback'
-            }`,
-            `External DB path: ${dataSourceConfig?.externalDbPath || 'Unavailable'}`,
-            `Local cache path: ${dataSourceConfig?.localDbPath || 'Unavailable'}`
+            'The dashboard uses only the WebUI local cache database.',
+            'Agent and task state is maintained by /acn/v3/element-logs messages.',
+            'Control Clear clears local agents, tasks, and ingested_logs.'
           ]
     }
   ];

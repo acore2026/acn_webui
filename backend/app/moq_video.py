@@ -10,9 +10,7 @@ This module matches the newer MOQ demo flow:
 
 import asyncio
 import base64
-import contextlib
 import hashlib
-import inspect
 import json
 import logging
 import ipaddress
@@ -283,14 +281,6 @@ class TrackBridgeState:
         self.metadata: Optional[Dict[str, Any]] = None
         self.init_segment: Optional[bytes] = None
         self.recent_fragments: deque[bytes] = deque(maxlen=MAX_REPLAY_FRAGMENTS)
-        self.latest_jpeg: Optional[bytes] = None
-        self.latest_jpeg_fragment_count = 0
-        self.latest_jpeg_sequence = 0
-        self.jpeg_lock = asyncio.Lock()
-        self.transcoder_process: Optional[asyncio.subprocess.Process] = None
-        self.transcoder_stdout_task: Optional[asyncio.Task] = None
-        self.transcoder_stderr_task: Optional[asyncio.Task] = None
-        self.transcoder_write_lock = asyncio.Lock()
         self.sessions: set["BrowserWebTransportSession"] = set()
         self.total_bytes = 0
         self.total_fragments = 0
@@ -316,9 +306,6 @@ class TrackBridgeState:
         self.metadata = None
         self.init_segment = None
         self.recent_fragments.clear()
-        self.latest_jpeg = None
-        self.latest_jpeg_fragment_count = 0
-        self.latest_jpeg_sequence = 0
         self.total_bytes = 0
         self.total_fragments = 0
 
@@ -333,9 +320,6 @@ class TrackBridgeState:
 
     def set_init_segment(self, payload: bytes):
         self.init_segment = payload
-        self.latest_jpeg = None
-        self.latest_jpeg_fragment_count = 0
-        self.latest_jpeg_sequence = 0
         self.total_bytes += len(payload)
         for session in tuple(self.sessions):
             session.send_binary(FRAME_TYPE_INIT, payload)
@@ -555,7 +539,6 @@ class MOQVideoSubscriber:
 
         self._object_queue: asyncio.Queue[ReceivedObject] = asyncio.Queue()
 
-        self._on_frame_received: Optional[Callable[[VideoFrameData], None]] = None
         self._on_track_subscribed: Optional[Callable[[str], None]] = None
         self._on_track_unsubscribed: Optional[Callable[[str], None]] = None
 
@@ -567,11 +550,9 @@ class MOQVideoSubscriber:
 
     def set_callbacks(
         self,
-        on_frame_received: Optional[Callable[[VideoFrameData], None]] = None,
         on_track_subscribed: Optional[Callable[[str], None]] = None,
         on_track_unsubscribed: Optional[Callable[[str], None]] = None,
     ):
-        self._on_frame_received = on_frame_received
         self._on_track_subscribed = on_track_subscribed
         self._on_track_unsubscribed = on_track_unsubscribed
 
@@ -673,9 +654,6 @@ class MOQVideoSubscriber:
         self._preview_bridge.metadata = None
         self._preview_bridge.init_segment = None
         self._preview_bridge.recent_fragments.clear()
-        self._preview_bridge.latest_jpeg = None
-        self._preview_bridge.latest_jpeg_fragment_count = 0
-        self._preview_bridge.latest_jpeg_sequence = 0
         self._preview_bridge.total_bytes = 0
         self._preview_bridge.total_fragments = 0
 
@@ -739,7 +717,6 @@ class MOQVideoSubscriber:
 
         for bridge in self._bridges.values():
             bridge.close_all_sessions()
-            await self._shutdown_mjpeg_transcoder(bridge)
         self._preview_bridge.close_all_sessions()
         self._reset_preview_bridge()
 
@@ -902,7 +879,6 @@ class MOQVideoSubscriber:
         bridge = self._bridges.get(track_id)
         if bridge:
             bridge.end_stream()
-            await self._shutdown_mjpeg_transcoder(bridge)
             bridge.reset()
         self._track_ready_events.pop(track_id, None)
         self._track_subscription_events.pop(track_id, None)
@@ -1012,7 +988,6 @@ class MOQVideoSubscriber:
         if bridge:
             bridge.end_stream()
             bridge.close_all_sessions()
-            await self._shutdown_mjpeg_transcoder(bridge)
             bridge.reset()
 
         self._watched_tracks.discard(track_id)
@@ -1052,32 +1027,6 @@ class MOQVideoSubscriber:
                 base64.b64encode(fragment).decode("ascii")
                 for fragment in self._preview_bridge.recent_fragments
             ],
-        }
-
-    async def get_latest_jpeg_frame(self, track_id: str) -> Optional[bytes]:
-        bridge = self._bridges.get(track_id)
-        if bridge is None:
-            return None
-        return bridge.latest_jpeg
-
-    def get_mjpeg_track_status(self, track_id: str) -> Dict[str, Any]:
-        bridge = self._bridges.get(track_id)
-        discovered = self._discovered_tracks.get(track_id)
-        metadata = (bridge.metadata if bridge else None) or (
-            discovered.metadata if discovered else None
-        )
-        return {
-            "track_id": track_id,
-            "status": "active" if bridge and bridge.recent_fragments else "inactive",
-            "watch_state": self._track_states.get(track_id, "unknown"),
-            "has_metadata": bool(metadata),
-            "has_init_segment": bool(bridge and bridge.init_segment),
-            "fragment_count": bridge.total_fragments if bridge else 0,
-            "has_frame": bool(bridge and bridge.latest_jpeg),
-            "jpeg_sequence": bridge.latest_jpeg_sequence if bridge else 0,
-            "width": metadata.get("width") if isinstance(metadata, dict) else None,
-            "height": metadata.get("height") if isinstance(metadata, dict) else None,
-            "metadata": metadata,
         }
 
     def _on_connected(self):
@@ -1149,7 +1098,6 @@ class MOQVideoSubscriber:
                     bridge.end_stream()
                     if track_id == self._preview_track_id:
                         self._preview_bridge.end_stream()
-                    await self._shutdown_mjpeg_transcoder(bridge)
                     self._append_buffer(
                         track_id,
                         VideoFrameData(
@@ -1200,7 +1148,6 @@ class MOQVideoSubscriber:
                     self._mark_track_ready_if_possible(track_id)
                     if track_id == self._preview_track_id:
                         self._preview_bridge.set_init_segment(obj.payload)
-                    await self._restart_mjpeg_transcoder(track_id, bridge)
                     self._append_buffer(
                         track_id,
                         VideoFrameData(
@@ -1232,7 +1179,6 @@ class MOQVideoSubscriber:
                 bridge.push_fragment(obj.payload)
                 if track_id == self._preview_track_id:
                     self._preview_bridge.push_fragment(obj.payload)
-                await self._push_fragment_to_mjpeg_transcoder(track_id, bridge, obj.payload)
                 self._append_buffer(
                     track_id,
                     VideoFrameData(
@@ -1265,17 +1211,6 @@ class MOQVideoSubscriber:
         frames.append(frame)
         if len(frames) > 30:
             self._frame_buffers[track_id] = frames[-30:]
-        if self._on_frame_received:
-            try:
-                callback_result = self._on_frame_received(frame)
-                if inspect.isawaitable(callback_result):
-                    asyncio.create_task(callback_result)
-            except Exception:
-                logger.error(
-                    "[MOQ] Failed to dispatch frame callback for %s",
-                    track_id,
-                    exc_info=True,
-                )
 
     @staticmethod
     def _try_parse_metadata(payload: bytes) -> Optional[Dict[str, Any]]:
@@ -1284,149 +1219,6 @@ class MOQVideoSubscriber:
         except Exception:
             return None
         return parsed if isinstance(parsed, dict) else None
-
-    async def _restart_mjpeg_transcoder(
-        self, track_id: str, bridge: TrackBridgeState
-    ) -> None:
-        await self._shutdown_mjpeg_transcoder(bridge)
-
-        width = int((bridge.metadata or {}).get("width") or 960)
-        height = int((bridge.metadata or {}).get("height") or 540)
-        if width <= 0 or height <= 0:
-            width, height = 960, 540
-
-        process = await asyncio.create_subprocess_exec(
-            "ffmpeg",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "nobuffer",
-            "-i",
-            "pipe:0",
-            "-vf",
-            f"fps=12,scale={width}:{height}",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-q:v",
-            "6",
-            "pipe:1",
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-
-        bridge.transcoder_process = process
-        bridge.transcoder_stdout_task = asyncio.create_task(
-            self._read_mjpeg_stdout(track_id, bridge, process)
-        )
-        bridge.transcoder_stderr_task = asyncio.create_task(
-            self._read_mjpeg_stderr(track_id, process)
-        )
-
-        if bridge.init_segment:
-            await self._write_to_mjpeg_transcoder(bridge, bridge.init_segment)
-        for fragment in list(bridge.recent_fragments):
-            await self._write_to_mjpeg_transcoder(bridge, fragment)
-
-    async def _shutdown_mjpeg_transcoder(self, bridge: TrackBridgeState) -> None:
-        process = bridge.transcoder_process
-        if process is None:
-            return
-
-        bridge.transcoder_process = None
-
-        for task in (bridge.transcoder_stdout_task, bridge.transcoder_stderr_task):
-            if task:
-                task.cancel()
-        for task_name in ("transcoder_stdout_task", "transcoder_stderr_task"):
-            task = getattr(bridge, task_name)
-            if task:
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
-            setattr(bridge, task_name, None)
-
-        with contextlib.suppress(Exception):
-            if process.stdin and not process.stdin.is_closing():
-                process.stdin.close()
-        with contextlib.suppress(Exception):
-            process.terminate()
-        with contextlib.suppress(Exception):
-            await asyncio.wait_for(process.wait(), timeout=1.0)
-        if process.returncode is None:
-            with contextlib.suppress(Exception):
-                process.kill()
-            with contextlib.suppress(Exception):
-                await process.wait()
-
-    async def _push_fragment_to_mjpeg_transcoder(
-        self, track_id: str, bridge: TrackBridgeState, fragment: bytes
-    ) -> None:
-        started = False
-        if bridge.transcoder_process is None or bridge.transcoder_process.returncode is not None:
-            await self._restart_mjpeg_transcoder(track_id, bridge)
-            started = True
-        if not started:
-            await self._write_to_mjpeg_transcoder(bridge, fragment)
-
-    async def _write_to_mjpeg_transcoder(
-        self, bridge: TrackBridgeState, payload: bytes
-    ) -> None:
-        process = bridge.transcoder_process
-        if process is None or process.stdin is None:
-            return
-        async with bridge.transcoder_write_lock:
-            process.stdin.write(payload)
-            await process.stdin.drain()
-
-    async def _read_mjpeg_stdout(
-        self, track_id: str, bridge: TrackBridgeState, process: asyncio.subprocess.Process
-    ) -> None:
-        if process.stdout is None:
-            return
-
-        buffer = bytearray()
-        while True:
-            chunk = await process.stdout.read(65536)
-            if not chunk:
-                return
-            buffer.extend(chunk)
-
-            while True:
-                start = buffer.find(b"\xff\xd8")
-                if start < 0:
-                    if len(buffer) > 2:
-                        del buffer[:-2]
-                    break
-                end = buffer.find(b"\xff\xd9", start + 2)
-                if end < 0:
-                    if start > 0:
-                        del buffer[:start]
-                    break
-
-                jpeg_bytes = bytes(buffer[start : end + 2])
-                del buffer[: end + 2]
-
-                async with bridge.jpeg_lock:
-                    bridge.latest_jpeg = jpeg_bytes
-                    bridge.latest_jpeg_fragment_count = bridge.total_fragments
-                    bridge.latest_jpeg_sequence += 1
-
-    async def _read_mjpeg_stderr(
-        self, track_id: str, process: asyncio.subprocess.Process
-    ) -> None:
-        if process.stderr is None:
-            return
-        while True:
-            line = await process.stderr.readline()
-            if not line:
-                return
-            logger.debug(
-                "[MOQ MJPEG] %s ffmpeg: %s",
-                track_id,
-                line.decode("utf-8", errors="ignore").rstrip(),
-            )
 
 
 moq_video_subscriber = MOQVideoSubscriber()

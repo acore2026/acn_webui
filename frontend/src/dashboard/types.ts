@@ -22,11 +22,22 @@ export interface TopologyAgentTrackModel {
   lastSeen: string;
 }
 
+export interface TopologyAgentTaskModel {
+  taskId: string;
+  taskName: string;
+  taskType: string;
+  description: string;
+  status: 'processing' | 'finished' | string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface TopologyAgentModel {
   id: string;
   name: string;
   role: string;
   status: AgentStatus;
+  priority: string;
   region: string;
   trackSummary: string;
   tracks: TopologyAgentTrackModel[];
@@ -36,6 +47,7 @@ export interface TopologyAgentModel {
   offlineTime: string;
   lastHeartbeat: string;
   taskCount: number;
+  tasks?: TopologyAgentTaskModel[];
   capabilities: string[];
   alerts: string[];
   position: {
@@ -103,15 +115,6 @@ export interface ControlTask {
   updatedAt: string;
 }
 
-export interface DatabaseSourceConfig {
-  useExternalDb: boolean;
-  externalDbPath: string;
-  externalDbExists: boolean;
-  localDbPath: string;
-  localDbExists: boolean;
-  activeSource: 'external' | 'local' | 'local-fallback' | string;
-}
-
 export interface CertificateRecord {
   certID: string;
   certName: string;
@@ -156,7 +159,6 @@ export interface VideoPlayerConfig {
   port: number;
   path: string;
   certHash: string;
-  mjpegUrl?: string;
 }
 
 export interface VideoPlayerBootstrap {

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { DemoConfigModal, DemoStage } from './dashboard/components/DemoConfigModal';
+import { WarningIcon } from './dashboard/components/icons';
 import { SidebarNav } from './dashboard/components/SidebarNav';
 import { ThemeMode } from './dashboard/components/ThemeSettingsButton';
 import { AgentsPage } from './dashboard/pages/AgentsPage';
@@ -12,7 +14,6 @@ import useWebSocket from './hooks/useWebSocket';
 import {
   BackendLogEntry,
   ControlTask,
-  DatabaseSourceConfig,
   DashboardMockData,
   NavKey,
   NetworkElementLogGroup,
@@ -73,8 +74,9 @@ const App = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [dataError, setDataError] = useState<string | null>(null);
   const [controlBusy, setControlBusy] = useState(false);
-  const [controlMessage, setControlMessage] = useState<string | null>(null);
-  const [controlTone, setControlTone] = useState<'success' | 'warning' | 'error' | null>(null);
+  const [, setControlMessage] = useState<string | null>(null);
+  const [, setControlTone] = useState<'success' | 'warning' | 'error' | null>(null);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [backendLogs, setBackendLogs] = useState<BackendLogEntry[]>([]);
   const [backendLogsLoading, setBackendLogsLoading] = useState(true);
   const [backendLogsError, setBackendLogsError] = useState<string | null>(null);
@@ -90,7 +92,6 @@ const App = () => {
   const [videoTracks, setVideoTracks] = useState<VideoTrackModel[]>([]);
   const [videoTracksLoading, setVideoTracksLoading] = useState(true);
   const [videoTracksError, setVideoTracksError] = useState<string | null>(null);
-  const [dataSourceConfig, setDataSourceConfig] = useState<DatabaseSourceConfig | null>(null);
   const [dispatchBusy, setDispatchBusy] = useState(false);
   const [stoppingTaskId, setStoppingTaskId] = useState<string | null>(null);
   const [topologyTestSpeed, setTopologyTestSpeed] = useState<number>(() => {
@@ -355,22 +356,6 @@ const App = () => {
     }
   }, [isZh]);
 
-  const fetchDataSourceConfig = useCallback(async () => {
-    try {
-      const response = await fetch('/api/settings/data-source');
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const payload = (await response.json()) as { config?: DatabaseSourceConfig };
-      setDataSourceConfig(payload.config ?? null);
-      return true;
-    } catch (error) {
-      console.error('Failed to load data source settings:', error);
-      return false;
-    }
-  }, []);
-
   useEffect(() => {
     void fetchVideoTracks();
     const interval = window.setInterval(() => {
@@ -379,10 +364,6 @@ const App = () => {
 
     return () => window.clearInterval(interval);
   }, [fetchVideoTracks]);
-
-  useEffect(() => {
-    void fetchDataSourceConfig();
-  }, [fetchDataSourceConfig]);
 
   useEffect(() => {
     void fetchNetworkElementControls();
@@ -502,25 +483,20 @@ const App = () => {
     }
   }, [applySnapshot, isZh]);
 
-  const handleReloadSnapshot = useCallback(async () => {
-    setControlTone('warning');
-    setControlMessage(isZh ? '正在重新加载仪表盘快照...' : 'Reloading dashboard snapshot...');
-    setIsLoading(true);
+  useEffect(() => {
+    if (!clearConfirmOpen) {
+      return;
+    }
 
-    const success = await fetchDashboard();
-    await fetchControlTasks();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !controlBusy) {
+        setClearConfirmOpen(false);
+      }
+    };
 
-    setControlTone(success ? 'success' : 'error');
-    setControlMessage(
-      success
-        ? isZh
-          ? '仪表盘快照已刷新。'
-          : 'Dashboard snapshot reloaded.'
-        : isZh
-          ? '快照刷新失败。'
-          : 'Snapshot reload failed.'
-    );
-  }, [fetchControlTasks, fetchDashboard, isZh]);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [clearConfirmOpen, controlBusy]);
 
   const handleDispatchTask = useCallback(
     async (payload: { taskName?: string; taskType: string; taskDescription: string; agentIds: string[] }) => {
@@ -918,43 +894,6 @@ const App = () => {
     [fetchVideoTracks, isZh]
   );
 
-  const handleSaveDataSourceConfig = useCallback(
-    async (next: { useExternalDb: boolean; externalDbPath: string }): Promise<void> => {
-      const response = await fetch('/api/settings/data-source', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(next)
-      });
-
-      const payload = (await response.json()) as {
-        config?: DatabaseSourceConfig;
-        dashboard?: DashboardMockData;
-        tasks?: ControlTask[];
-        detail?: string;
-        message?: string;
-      };
-
-      if (!response.ok || !payload.config) {
-        throw new Error(
-          payload.detail ||
-            payload.message ||
-            (isZh ? '数据库来源更新失败。' : 'Failed to update database source.')
-        );
-      }
-
-      setDataSourceConfig(payload.config);
-      applySnapshot(payload.dashboard);
-      if (Array.isArray(payload.tasks)) {
-        setControlTasks(payload.tasks);
-        setControlTasksLoading(false);
-        setControlTasksError(null);
-      }
-    },
-    [applySnapshot, isZh]
-  );
-
   const renderPage = () => {
     switch (activeTab) {
       case 'agents':
@@ -972,8 +911,6 @@ const App = () => {
       case 'network':
         return (
           <NetworkPage
-            agents={dashboardData.topology.agents}
-            links={dashboardData.topology.links}
             backendLogs={backendLogs}
             backendLogsLoading={backendLogsLoading}
             backendLogsError={backendLogsError}
@@ -991,12 +928,9 @@ const App = () => {
             tasksLoading={controlTasksLoading}
             tasksError={controlTasksError}
             language={language}
-            clearInProgress={controlBusy}
             dispatchInProgress={dispatchBusy}
             stoppingTaskId={stoppingTaskId}
-            onClearEnvironment={handleClearEnvironment}
             onDispatchTask={handleDispatchTask}
-            onReloadSnapshot={handleReloadSnapshot}
             onStopTask={handleStopTask}
             networkElements={networkElementControls}
             networkElementBusyKey={networkElementBusyKey}
@@ -1004,12 +938,10 @@ const App = () => {
             onControlNetworkElement={handleControlNetworkElement}
             websocketConnected={connected}
             apiHealthy={!dataError}
-            statusMessage={controlMessage}
-            statusTone={controlTone}
           />
         );
       case 'settings':
-        return <SettingsPage language={language} dataSourceConfig={dataSourceConfig} />;
+        return <SettingsPage language={language} />;
       case 'overview':
       default:
         return (
@@ -1022,6 +954,75 @@ const App = () => {
     }
   };
 
+  const clearConfirmDialog =
+    clearConfirmOpen && typeof document !== 'undefined'
+      ? createPortal(
+          <div
+            className="fixed inset-0 z-[250] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+            role="presentation"
+            onClick={() => {
+              if (!controlBusy) {
+                setClearConfirmOpen(false);
+              }
+            }}
+          >
+            <div
+              className="glass-panel w-full max-w-xl p-6 md:p-7"
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="clear-confirm-title"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="flex items-start gap-4">
+                <span className="theme-badge-rose flex h-12 w-12 items-center justify-center rounded-2xl border">
+                  <WarningIcon className="h-5 w-5" />
+                </span>
+                <div>
+                  <p className="panel-eyebrow">{isZh ? '二次确认' : 'Confirmation Required'}</p>
+                  <h3 id="clear-confirm-title" className="theme-title mt-2 text-xl font-semibold">
+                    {isZh ? '确认清理环境？' : 'Confirm environment clear?'}
+                  </h3>
+                  <p className="theme-copy mt-3 text-sm leading-6">
+                    {isZh
+                      ? '此操作会调用后端 /clear，重置共享环境状态，并刷新所有已连接 WebUI 会话。请确认当前确实需要执行。'
+                      : 'This action calls the backend /clear route, resets shared environment state, and refreshes all connected WebUI sessions. Confirm that you really want to run it.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="mt-6 flex flex-wrap justify-end gap-3">
+                <button
+                  type="button"
+                  className="theme-top-button px-5 py-3"
+                  onClick={() => setClearConfirmOpen(false)}
+                  disabled={controlBusy}
+                >
+                  {isZh ? '取消' : 'Cancel'}
+                </button>
+                <button
+                  type="button"
+                  className={[
+                    'theme-top-button px-5 py-3',
+                    controlBusy ? 'cursor-wait opacity-70' : ''
+                  ].join(' ')}
+                  onClick={() => {
+                    void handleClearEnvironment();
+                    setClearConfirmOpen(false);
+                  }}
+                  disabled={controlBusy}
+                >
+                  <span className="theme-badge-rose flex h-8 w-8 items-center justify-center rounded-2xl border">
+                    <WarningIcon className="h-4 w-4" />
+                  </span>
+                  {controlBusy ? (isZh ? '环境清理中...' : 'Clearing environment...') : (isZh ? '确认执行 Clear' : 'Confirm Clear')}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )
+      : null;
+
   return (
     <div className="theme-shell relative min-h-screen">
       <div className="pointer-events-none absolute inset-0 overflow-hidden">
@@ -1032,12 +1033,10 @@ const App = () => {
       <div className="relative flex min-h-screen flex-col md:flex-row">
         <SidebarNav
           activeTab={activeTab}
-          dataSourceConfig={dataSourceConfig}
           language={language}
           theme={theme}
           fullDemoBusy={fullDemoBusy}
           fullDemoMessage={fullDemoMessage}
-          onDatabaseSourceSave={handleSaveDataSourceConfig}
           onLanguageChange={setLanguage}
           onOpenDemoConfig={() => setDemoConfigOpen(true)}
           onQuickRunDemo={handleQuickRunDemo}
@@ -1067,6 +1066,19 @@ const App = () => {
               </div>
 
               <div className="flex flex-col items-stretch gap-3 lg:items-end">
+                {activeTab === 'control' ? (
+                  <button
+                    type="button"
+                    className={[
+                      'theme-top-button justify-center px-5 py-3 theme-badge-rose border',
+                      controlBusy ? 'cursor-wait opacity-70' : ''
+                    ].join(' ')}
+                    onClick={() => setClearConfirmOpen(true)}
+                    disabled={controlBusy}
+                  >
+                    Clear
+                  </button>
+                ) : null}
                 <div className="grid gap-3 sm:grid-cols-3">
                   <div className="theme-card-muted px-4 py-4">
                     <p className="theme-muted text-xs uppercase tracking-[0.22em]">{copy.shellStatus.online}</p>
@@ -1089,6 +1101,7 @@ const App = () => {
         </main>
       </div>
 
+      {clearConfirmDialog}
       <DemoConfigModal
         open={demoConfigOpen}
         busy={fullDemoBusy}

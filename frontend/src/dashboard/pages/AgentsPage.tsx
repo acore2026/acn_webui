@@ -226,24 +226,16 @@ export const AgentsPage = ({
 
               <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '角色' : 'Role'}</dt>
-                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.role}</dd>
+                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '优先级' : 'Priority'}</dt>
+                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.priority || '--'}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
                   <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '区域' : 'Region'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.region}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '轨道' : 'Track'}</dt>
-                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.trackSummary || trackSummaryEmpty}</dd>
-                </div>
-                <div className="theme-subtle-card p-4">
                   <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行中任务' : 'Running Tasks'}</dt>
                   <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.taskCount}</dd>
-                </div>
-                <div className="theme-subtle-card p-4">
-                  <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行时长' : 'Uptime'}</dt>
-                  <dd className="theme-title mt-2 text-sm font-medium">{selectedAgent.uptime}</dd>
                 </div>
                 <div className="theme-subtle-card p-4">
                   <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '上线时间' : 'Launch Time'}</dt>
@@ -275,17 +267,39 @@ export const AgentsPage = ({
                 </div>
 
                 <div>
-                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '轨道信息' : 'Track Inventory'}</h4>
+                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '任务信息' : 'Tasks'}</h4>
+                  <div className="mt-3 space-y-2">
+                    {selectedAgent.tasks?.length ? (
+                      selectedAgent.tasks.map((task) => (
+                        <div key={`${task.taskId}-${task.status}`} className="theme-subtle-card px-4 py-3 text-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <p className="theme-title break-words font-medium">{task.taskId}</p>
+                            <span className={task.status === 'processing' ? 'theme-badge-amber rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]' : 'theme-badge-emerald rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]'}>
+                              {task.status}
+                            </span>
+                          </div>
+                          <p className="theme-soft mt-2 leading-6">{task.description || task.taskName || '-'}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="theme-subtle-card theme-copy px-4 py-3 text-sm leading-6">
+                        {isZh ? '暂无任务' : 'No tasks'}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div>
+                  <h4 className="theme-title text-sm font-semibold uppercase tracking-[0.18em]">{isZh ? '发布轨道信息' : 'Published Track Info'}</h4>
                   <div className="mt-3 space-y-2">
                     {selectedAgent.tracks.length ? (
                       selectedAgent.tracks.map((track) => (
                         <div key={track.id} className="theme-subtle-card px-4 py-3 text-sm">
-                          <p className="theme-title font-medium">{track.name}</p>
-                          <p className="theme-soft mt-1 leading-6">
-                            {isZh ? '任务' : 'Task'}: {track.taskId || '-'}
-                          </p>
-                          <p className="theme-soft leading-6">
-                            {isZh ? '命名空间' : 'Namespace'}: {track.namespace || '-'}
+                          <p className="theme-title break-words font-medium">
+                            {(track.namespace ? `${track.namespace.replace(/^\/+/, '')}/` : '') + track.name}
+                            <span className="theme-soft ml-2 font-normal">
+                              {track.taskId ? `(${isZh ? '任务' : 'Task'}: ${track.taskId})` : ''}
+                            </span>
                           </p>
                         </div>
                       ))
@@ -319,7 +333,6 @@ export const AgentsPage = ({
       <SectionCard
         id="agents-section"
         eyebrow={isZh ? '智能体' : 'Agents'}
-        title={isZh ? '智能体名册' : 'Fleet Roster'}
         description={
           isZh
             ? '点击任意智能体卡片即可打开专属详情窗口，查看其资料、健康状态、视频轨道以及上线/离线时间。'
@@ -347,7 +360,6 @@ export const AgentsPage = ({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <h3 className="theme-title text-lg font-semibold">{agent.name}</h3>
-                    <p className="theme-soft mt-1 text-sm">{agent.role}</p>
                   </div>
                   <span className={`rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.2em] ${statusTone[agent.status]}`}>
                     {statusLabel[agent.status]}
@@ -355,12 +367,22 @@ export const AgentsPage = ({
                 </div>
                 <dl className="theme-copy mt-5 grid gap-3 text-sm sm:grid-cols-2">
                   <div className="theme-subtle-card p-4">
-                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '区域' : 'Region'}</dt>
-                    <dd className="theme-title mt-2 font-medium">{agent.region}</dd>
+                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '能力标签' : 'Capabilities'}</dt>
+                    <dd className="mt-3 flex flex-wrap gap-2">
+                      {agent.capabilities.length ? (
+                        agent.capabilities.map((capability) => (
+                          <span key={`${agent.id}-${capability}`} className="theme-chip px-2.5 py-1 text-xs font-medium">
+                            {capability}
+                          </span>
+                        ))
+                      ) : (
+                        <span className="theme-title font-medium">-</span>
+                      )}
+                    </dd>
                   </div>
                   <div className="theme-subtle-card p-4">
-                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '轨道' : 'Track'}</dt>
-                    <dd className="theme-title mt-2 font-medium">{agent.trackSummary || trackSummaryEmpty}</dd>
+                    <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '运行中任务' : 'Running Tasks'}</dt>
+                    <dd className="theme-title mt-2 font-medium">{agent.taskCount}</dd>
                   </div>
                   <div className="theme-subtle-card p-4 sm:col-span-2">
                     <dt className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '上线时间' : 'Launch Time'}</dt>

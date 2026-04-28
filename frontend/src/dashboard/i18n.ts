@@ -2,8 +2,8 @@ export type LanguageMode = 'en' | 'zh';
 
 export const shellCopy = {
   en: {
-    brandEyebrow: 'Command Mesh',
-    brandTitle: 'Ops Dashboard',
+    brandEyebrow: '',
+    brandTitle: 'AI Core',
     nav: {
       overview: { label: 'Overview', detail: 'Mission overview' },
       agents: { label: 'Agents', detail: 'Roster and health' },
@@ -43,7 +43,7 @@ export const shellCopy = {
       }
     },
     shellStatus: {
-      missionEyebrow: 'Mission Control Dashboard',
+      missionEyebrow: 'Control',
       websocketLive: 'WebSocket live',
       websocketReconnect: 'WebSocket reconnecting',
       apiLoading: 'Loading API snapshot',
@@ -67,32 +67,6 @@ export const shellCopy = {
       enDescription: 'Show the dashboard in English.',
       zhLabel: '中文',
       zhDescription: '将仪表盘界面切换为中文。'
-    },
-    databaseMenu: {
-      title: 'Data Source',
-      description: 'Choose whether the dashboard reads the external SQLite database or uses the local cache built from logs.',
-      buttonLabel: 'Database settings',
-      externalLabel: 'Use external DB',
-      externalDescription: 'Read agents and tasks from a specific SQLite database path.',
-      localLabel: 'Use local cache',
-      localDescription: 'Do not read the external DB. Build dashboard state from logs and local task actions.',
-      pathLabel: 'External DB path',
-      pathPlaceholder: '/path/to/agent_gw.db',
-      localPathLabel: 'Local cache DB',
-      activeSourceLabel: 'Active source',
-      externalExists: 'External DB reachable',
-      externalMissing: 'External DB not found',
-      localExists: 'Local cache ready',
-      localMissing: 'Local cache not initialized',
-      activeExternal: 'External DB',
-      activeLocal: 'Local cache',
-      activeFallback: 'Local fallback',
-      open: 'Data source',
-      close: 'Close',
-      save: 'Save',
-      saving: 'Saving...',
-      saved: 'Database source updated.',
-      failed: 'Failed to update database source.'
     },
     certificates: {
       title: 'Certificate Management',
@@ -215,8 +189,8 @@ export const shellCopy = {
     }
   },
   zh: {
-    brandEyebrow: '指挥网格',
-    brandTitle: '运维看板',
+    brandEyebrow: '',
+    brandTitle: 'AI Core',
     nav: {
       overview: { label: '总览', detail: '任务概览' },
       agents: { label: '智能体', detail: '名册与健康' },
@@ -256,7 +230,7 @@ export const shellCopy = {
       }
     },
     shellStatus: {
-      missionEyebrow: '任务控制看板',
+      missionEyebrow: '控制',
       websocketLive: 'WebSocket 已连接',
       websocketReconnect: 'WebSocket 重连中',
       apiLoading: '正在加载接口快照',
@@ -280,32 +254,6 @@ export const shellCopy = {
       enDescription: '将仪表盘界面切换为英文。',
       zhLabel: '中文',
       zhDescription: '将仪表盘界面切换为中文。'
-    },
-    databaseMenu: {
-      title: '数据源',
-      description: '选择仪表盘是读取指定 SQLite 数据库，还是使用由日志和本地任务动作维护的本地缓存。',
-      buttonLabel: '数据库设置',
-      externalLabel: '使用外部数据库',
-      externalDescription: '从指定路径的 SQLite 数据库读取 agents 和 tasks。',
-      localLabel: '使用本地缓存',
-      localDescription: '不读取外部数据库，改为根据日志和本地任务动作维护仪表盘状态。',
-      pathLabel: '外部数据库路径',
-      pathPlaceholder: '/path/to/agent_gw.db',
-      localPathLabel: '本地缓存数据库',
-      activeSourceLabel: '当前生效来源',
-      externalExists: '外部数据库可访问',
-      externalMissing: '未找到外部数据库',
-      localExists: '本地缓存已就绪',
-      localMissing: '本地缓存未初始化',
-      activeExternal: '外部数据库',
-      activeLocal: '本地缓存',
-      activeFallback: '本地兜底',
-      open: '数据源',
-      close: '关闭',
-      save: '保存',
-      saving: '保存中...',
-      saved: '数据库来源已更新。',
-      failed: '数据库来源更新失败。'
     },
     certificates: {
       title: '证书管理',

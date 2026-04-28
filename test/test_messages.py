@@ -136,8 +136,8 @@ def test_pipeline_messages(backend_url):
         ("IDM", "Agent GW", "HTTP/2", "Identity verification completed", "VC issued successfully", "task-001"),
         ("Agent GW", "ARF", "HTTP/2", "Agent discovery request", "Requesting available agents for patrol task", "task-002"),
         ("ARF", "Agent GW", "HTTP/2", "Discovery results", "Found 3 matching agents", "task-002"),
-        ("Drone Alpha", "MOQT Relay", "MOQT", "Subscribe to track", "Subscribing to surveillance-feed-01", None),
-        ("MOQT Relay", "Drone Alpha", "MOQT", "Subscription confirmed", "Track surveillance-feed-01 active", None),
+        ("Drone Alpha", "ACF", "WebSocket", "Task channel setup", "Task telemetry channel established", None),
+        ("ACF", "Drone Alpha", "WebSocket", "Task channel confirmed", "Telemetry channel active", None),
         ("Drone Beta", "ACF", "WebSocket", "Status update", "Target T-001 detected at coordinates [34.0522, -118.2437]", "task-003"),
         ("ACF", "Ground Unit 1", "GTP-U+", "Dispatch command", "Proceed to location for backup", "task-004"),
         ("Marine Unit A", "ACF", "WebSocket", "Sonar data", "Underwater scan completed, no anomalies", None),
@@ -245,8 +245,8 @@ def test_mixed_scenario(backend_url):
     print("\n  Step 5: Agent starting task...")
     send_element_log(backend_url, "ACN Agent", "LLMMessage", agent_id, agent_name,
                     message="Task received: Patrol sector A")
-    send_pipeline_log(backend_url, agent_name, "MOQT Relay", "MOQT", "Subscribe to video feed", 
-                     "Subscribing to sector-a-feed", "task-001")
+    send_pipeline_log(backend_url, agent_name, "ACF", "WebSocket", "Task telemetry update", 
+                     "Starting sector-a telemetry stream", "task-001")
     time.sleep(1)
     
     # 6. 任务执行中

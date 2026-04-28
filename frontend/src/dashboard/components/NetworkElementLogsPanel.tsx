@@ -79,7 +79,7 @@ const renderEntries = (entries: BackendLogEntry[], language: LanguageMode) => {
   }
 
   return (
-    <div className="space-y-3 font-mono text-sm">
+    <div className="min-w-0 space-y-3 font-mono text-sm">
       {entries.map((entry, index) => {
         const tone = resolveTone(entry.level);
         const toneStyle = toneStyles[tone];
@@ -88,7 +88,7 @@ const renderEntries = (entries: BackendLogEntry[], language: LanguageMode) => {
         return (
           <div
             key={`${entry.time ?? 'log'}-${index}`}
-            className="theme-subtle-card flex gap-3 px-4 py-3"
+            className="theme-subtle-card flex min-w-0 gap-3 px-4 py-3"
           >
             <div className={`mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl ${toneStyle.badge}`}>
               <Icon className="h-4 w-4" />
@@ -102,7 +102,7 @@ const renderEntries = (entries: BackendLogEntry[], language: LanguageMode) => {
                   {formatTime(entry.time)}
                 </span>
               </div>
-              <p className="theme-copy mt-2 break-words leading-6">{entry.message}</p>
+              <p className="theme-copy mt-2 break-words leading-6 [overflow-wrap:anywhere]">{entry.message}</p>
             </div>
           </div>
         );
@@ -161,9 +161,9 @@ export const NetworkElementLogsPanel = ({
   }, [activeGroup, activeSubLogId]);
 
   return (
-    <section className="theme-card-muted p-5">
+    <section className="theme-card-muted min-w-0 p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="min-w-0">
           <h3 className="theme-title text-lg font-semibold">{isZh ? '网络组件日志' : 'Network Element Logs'}</h3>
           <p className="theme-soft mt-1 text-sm">
             {isZh
@@ -171,7 +171,7 @@ export const NetworkElementLogsPanel = ({
               : 'Reads the latest ACN Agent, AgentGW, and IDM log files so you can inspect each network element directly.'}
           </p>
         </div>
-        <span className="theme-chip px-3 py-1 text-xs font-medium">
+        <span className="theme-chip shrink-0 px-3 py-1 text-xs font-medium">
           {loading ? (isZh ? '刷新中…' : 'Refreshing…') : (isZh ? `${groups.length} 个组件` : `${groups.length} elements`)}
         </span>
       </div>
@@ -192,12 +192,12 @@ export const NetworkElementLogsPanel = ({
                   type="button"
                   onClick={() => setActiveGroupId(group.id)}
                   className={[
-                    'flex items-center gap-3 rounded-2xl border px-4 py-3 text-left transition',
+                    'flex max-w-full min-w-0 items-center gap-3 rounded-2xl border px-4 py-3 text-left transition',
                     isActive ? 'theme-nav-active shadow-glow' : 'theme-nav-button'
                   ].join(' ')}
                 >
-                  <span className="text-sm font-medium">{group.name}</span>
-                  <span className="theme-muted text-xs">
+                  <span className="min-w-0 truncate text-sm font-medium">{group.name}</span>
+                  <span className="theme-muted shrink-0 text-xs">
                     {isZh ? `${group.entries.length} 条` : `${group.entries.length} lines`}
                   </span>
                 </button>
@@ -216,12 +216,12 @@ export const NetworkElementLogsPanel = ({
                     type="button"
                     onClick={() => setActiveSubLogId(subLog.id)}
                     className={[
-                      'flex items-center gap-3 rounded-2xl border px-4 py-2.5 text-left transition',
+                      'flex max-w-full min-w-0 items-center gap-3 rounded-2xl border px-4 py-2.5 text-left transition',
                       isActive ? 'theme-nav-active shadow-glow' : 'theme-nav-button'
                     ].join(' ')}
                   >
-                    <span className="text-sm font-medium">{subLog.name}</span>
-                    <span className="theme-muted text-xs">
+                    <span className="min-w-0 truncate text-sm font-medium">{subLog.name}</span>
+                    <span className="theme-muted shrink-0 text-xs">
                       {isZh ? `${subLog.entries.length} 条` : `${subLog.entries.length} lines`}
                     </span>
                   </button>
@@ -231,15 +231,15 @@ export const NetworkElementLogsPanel = ({
           ) : null}
 
           {activeSource ? (
-            <article className="theme-subtle-card flex min-h-[420px] flex-col p-4">
+            <article className="theme-subtle-card flex min-h-[420px] min-w-0 flex-col p-4">
               <div className="border-b border-[color:var(--border-soft)] pb-3">
-                <div className="flex items-center justify-between gap-3">
-                  <h4 className="theme-title text-base font-semibold">
+                <div className="flex min-w-0 items-center justify-between gap-3">
+                  <h4 className="theme-title min-w-0 break-words text-base font-semibold [overflow-wrap:anywhere]">
                     {activeGroup?.subLogs && activeGroup.subLogs.length > 0
                       ? `${activeGroup.name} / ${activeSource.name}`
                       : activeSource.name}
                   </h4>
-                  <span className="theme-chip px-2.5 py-1 text-[11px] font-medium">
+                  <span className="theme-chip shrink-0 px-2.5 py-1 text-[11px] font-medium">
                     {isZh ? `${activeSource.entries.length} 条` : `${activeSource.entries.length} lines`}
                   </span>
                 </div>
@@ -248,7 +248,7 @@ export const NetworkElementLogsPanel = ({
                 ) : null}
               </div>
 
-              <div className="mt-4 h-[360px] overflow-y-auto rounded-3xl border border-[color:var(--border-soft)] bg-[color:var(--surface-strong)]/80 p-3">
+              <div className="mt-4 h-[360px] max-w-full overflow-x-hidden overflow-y-auto rounded-3xl border border-[color:var(--border-soft)] bg-[color:var(--surface-strong)]/80 p-3">
                 {activeSource.error ? (
                   <div className="flex h-full items-center justify-center rounded-2xl border border-[color:var(--accent-rose-border)] bg-[color:var(--accent-rose-bg)] px-4 text-sm text-[color:var(--accent-rose-text)]">
                     {activeSource.error}

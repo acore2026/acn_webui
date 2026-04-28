@@ -1,19 +1,15 @@
 import { NavKey } from '../types';
 import { LanguageMode, shellCopy } from '../i18n';
 import { AgentsIcon, ControlIcon, NetworkIcon, OverviewIcon, PlayIcon, SettingsIcon, SignalIcon } from './icons';
-import { DatabaseSourceConfig } from '../types';
-import { DatabaseSettingsButton } from './DatabaseSettingsButton';
 import { LanguageSettingsButton } from './LanguageSettingsButton';
 import { ThemeMode, ThemeSettingsButton } from './ThemeSettingsButton';
 
 interface SidebarNavProps {
   activeTab: NavKey;
-  dataSourceConfig: DatabaseSourceConfig | null;
   language: LanguageMode;
   theme: ThemeMode;
   fullDemoBusy: boolean;
   fullDemoMessage: string | null;
-  onDatabaseSourceSave: (next: { useExternalDb: boolean; externalDbPath: string }) => Promise<void>;
   onLanguageChange: (language: LanguageMode) => void;
   onOpenDemoConfig: () => void;
   onQuickRunDemo: () => void;
@@ -35,12 +31,10 @@ const navItems: Array<{
 
 export const SidebarNav = ({
   activeTab,
-  dataSourceConfig,
   language,
   theme,
   fullDemoBusy,
   fullDemoMessage,
-  onDatabaseSourceSave,
   onLanguageChange,
   onOpenDemoConfig,
   onQuickRunDemo,
@@ -56,15 +50,17 @@ export const SidebarNav = ({
             <OverviewIcon className="h-6 w-6" />
           </div>
           <div>
-            <p className="theme-sidebar-brand text-xs font-semibold uppercase tracking-[0.28em]">
-              {copy.brandEyebrow}
-            </p>
+            {copy.brandEyebrow ? (
+              <p className="theme-sidebar-brand text-xs font-semibold uppercase tracking-[0.28em]">
+                {copy.brandEyebrow}
+              </p>
+            ) : null}
             <h1 className="theme-title text-xl font-semibold">{copy.brandTitle}</h1>
           </div>
         </div>
 
         <nav className="flex flex-row gap-2 overflow-x-auto pb-2 md:flex-col md:overflow-visible">
-          {navItems.map(({ key, label, Icon }) => {
+          {navItems.map(({ key, Icon }) => {
             const isActive = key === activeTab;
             const navCopy = copy.nav[key];
 
@@ -150,11 +146,6 @@ export const SidebarNav = ({
           </div>
 
           <div className="pt-3 md:flex md:items-center md:gap-3">
-            <DatabaseSettingsButton
-              config={dataSourceConfig}
-              language={language}
-              onSave={onDatabaseSourceSave}
-            />
             <ThemeSettingsButton theme={theme} language={language} onThemeChange={onThemeChange} />
             <LanguageSettingsButton language={language} onLanguageChange={onLanguageChange} />
           </div>

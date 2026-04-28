@@ -6,7 +6,6 @@ Port: 9005
 """
 
 import asyncio
-import base64
 import json
 import os
 import secrets
@@ -14,15 +13,13 @@ import socket
 import sqlite3
 import re
 import tempfile
-import threading
 from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import quote
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import uvicorn
 from typing import List, Dict, Any, Optional
@@ -30,23 +27,18 @@ import httpx
 from cryptography import x509
 from cryptography.x509.oid import NameOID
 
-# Import video stream manager
-from .video_stream import video_stream_manager, StreamStatus
-
 # Import MOQ video subscriber
 try:
-    from .moq_video import moq_video_subscriber, VideoFrame
+    from .moq_video import moq_video_subscriber
 
     MOQ_AVAILABLE = True
 except ImportError as e:
     print(f"[Warning] MOQ video subscriber not available: {e}")
     MOQ_AVAILABLE = False
 
-# Database paths and source settings
+# Database paths
 ROOT_DIR = Path(__file__).resolve().parents[2]
-EXTERNAL_DB_DEFAULT_PATH = "/home/acn/zqm/acn_gw/agent_gw/agent_gw.db"
 LOCAL_CACHE_DB_PATH = ROOT_DIR / "logs" / "webui_local_state.db"
-DATA_SOURCE_SETTINGS_PATH = ROOT_DIR / "logs" / "data_source_settings.json"
 CERT_DB_PATH = ROOT_DIR / "logs" / "certificates.db"
 CERT_STORAGE_DIR = ROOT_DIR / "logs" / "cert_store"
 IDM_CERT_UPLOAD_URL = "http://127.0.0.1:9020/idm/v1/cert-upload"
@@ -165,66 +157,10 @@ NETWORK_ELEMENT_LOG_SOURCES = [
     },
 ]
 
-DATA_SOURCE_SETTINGS_LOCK = threading.Lock()
-DEFAULT_DATA_SOURCE_SETTINGS = {
-    "useExternalDb": True,
-    "externalDbPath": EXTERNAL_DB_DEFAULT_PATH,
-}
-
-
 def _ensure_runtime_dirs() -> None:
     LOCAL_CACHE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DATA_SOURCE_SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     CERT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     CERT_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def _load_data_source_settings() -> Dict[str, Any]:
-    _ensure_runtime_dirs()
-    if not DATA_SOURCE_SETTINGS_PATH.exists():
-        return dict(DEFAULT_DATA_SOURCE_SETTINGS)
-
-    try:
-        raw = json.loads(DATA_SOURCE_SETTINGS_PATH.read_text(encoding="utf-8"))
-    except Exception:
-        return dict(DEFAULT_DATA_SOURCE_SETTINGS)
-
-    settings = dict(DEFAULT_DATA_SOURCE_SETTINGS)
-    if isinstance(raw, dict):
-        settings["useExternalDb"] = bool(raw.get("useExternalDb", settings["useExternalDb"]))
-        external_path = str(raw.get("externalDbPath") or settings["externalDbPath"]).strip()
-        settings["externalDbPath"] = external_path or EXTERNAL_DB_DEFAULT_PATH
-    return settings
-
-
-def _save_data_source_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = {
-        "useExternalDb": bool(settings.get("useExternalDb", True)),
-        "externalDbPath": str(settings.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH).strip()
-        or EXTERNAL_DB_DEFAULT_PATH,
-    }
-    _ensure_runtime_dirs()
-    with DATA_SOURCE_SETTINGS_LOCK:
-        DATA_SOURCE_SETTINGS_PATH.write_text(
-            json.dumps(normalized, indent=2, ensure_ascii=True) + "\n",
-            encoding="utf-8",
-        )
-    return normalized
-
-
-data_source_settings: Dict[str, Any] = _load_data_source_settings()
-
-
-def get_data_source_settings() -> Dict[str, Any]:
-    return dict(data_source_settings)
-
-
-def get_external_db_path() -> str:
-    return str(data_source_settings.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH)
-
-
-def should_use_external_db() -> bool:
-    return bool(data_source_settings.get("useExternalDb", True))
 
 
 def get_local_cache_db_path() -> str:
@@ -245,6 +181,9 @@ def ensure_local_cache_db() -> None:
                 agent_status TEXT DEFAULT 'offline',
                 work_status TEXT DEFAULT 'idle',
                 current_task TEXT DEFAULT '',
+                priority TEXT DEFAULT '',
+                consent TEXT DEFAULT '{}',
+                track_info TEXT DEFAULT '[]',
                 last_update TEXT,
                 launch_time TEXT,
                 offline_time TEXT,
@@ -252,9 +191,15 @@ def ensure_local_cache_db() -> None:
             )
             """
         )
-        for column_name in ("launch_time", "offline_time"):
+        for column_name, column_type in (
+            ("launch_time", "TEXT"),
+            ("offline_time", "TEXT"),
+            ("priority", "TEXT DEFAULT ''"),
+            ("consent", "TEXT DEFAULT '{}'"),
+            ("track_info", "TEXT DEFAULT '[]'"),
+        ):
             try:
-                cursor.execute(f"ALTER TABLE agents ADD COLUMN {column_name} TEXT")
+                cursor.execute(f"ALTER TABLE agents ADD COLUMN {column_name} {column_type}")
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
@@ -297,29 +242,6 @@ def ensure_local_cache_db() -> None:
         conn.commit()
     finally:
         conn.close()
-
-
-def _connect_external_db_readonly(path: str) -> sqlite3.Connection:
-    normalized = str(path or "").strip()
-    if not normalized:
-        raise FileNotFoundError("External database path is empty")
-    if not Path(normalized).exists():
-        raise FileNotFoundError(f"External database does not exist: {normalized}")
-    conn = sqlite3.connect(f"file:{normalized}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def _connect_external_db_writable(path: str) -> sqlite3.Connection:
-    normalized = str(path or "").strip()
-    if not normalized:
-        raise FileNotFoundError("External database path is empty")
-    parent = Path(normalized).expanduser().resolve().parent
-    if not parent.exists():
-        raise FileNotFoundError(f"External database directory does not exist: {parent}")
-    conn = sqlite3.connect(normalized)
-    conn.row_factory = sqlite3.Row
-    return conn
 
 
 def _connect_local_cache_db() -> sqlite3.Connection:
@@ -652,6 +574,9 @@ def _upsert_local_agent(
     work_status: Optional[str] = None,
     current_task: Optional[str] = None,
     agent_capability: Optional[List[str]] = None,
+    priority: Optional[str] = None,
+    consent: Optional[Dict[str, Any]] = None,
+    track_info: Optional[List[Dict[str, Any]]] = None,
     last_update: Optional[str] = None,
     launch_time: Optional[str] = None,
     offline_time: Optional[str] = None,
@@ -666,7 +591,7 @@ def _upsert_local_agent(
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time
+            SELECT agent_name, agent_capability, agent_status, work_status, current_task, priority, consent, track_info, last_update, launch_time, offline_time
             FROM agents
             WHERE agent_id = ?
             """,
@@ -698,6 +623,21 @@ def _upsert_local_agent(
             if current_task is not None
             else (row["current_task"] if row else "")
         )
+        resolved_priority = (
+            str(priority).strip()
+            if priority is not None and str(priority).strip()
+            else (row["priority"] if row else "")
+        )
+        consent_json = (
+            json.dumps(consent)
+            if consent is not None
+            else (row["consent"] if row else "{}")
+        )
+        track_info_json = (
+            json.dumps(track_info)
+            if track_info is not None
+            else (row["track_info"] if row else "[]")
+        )
         resolved_last_update = (
             str(last_update).strip()
             if last_update is not None and str(last_update).strip()
@@ -714,8 +654,6 @@ def _upsert_local_agent(
             else (row["offline_time"] if row else None)
         )
 
-        if resolved_work_status != "idle" and resolved_status == "offline":
-            resolved_status = "online"
         if resolved_status == "offline":
             resolved_offline_time = resolved_offline_time or resolved_last_update or now_iso
         else:
@@ -725,14 +663,17 @@ def _upsert_local_agent(
         cursor.execute(
             """
             INSERT INTO agents (
-                agent_id, agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                agent_id, agent_name, agent_capability, agent_status, work_status, current_task, priority, consent, track_info, last_update, launch_time, offline_time, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(agent_id) DO UPDATE SET
                 agent_name = excluded.agent_name,
                 agent_capability = excluded.agent_capability,
                 agent_status = excluded.agent_status,
                 work_status = excluded.work_status,
                 current_task = excluded.current_task,
+                priority = excluded.priority,
+                consent = excluded.consent,
+                track_info = excluded.track_info,
                 last_update = excluded.last_update,
                 launch_time = excluded.launch_time,
                 offline_time = excluded.offline_time,
@@ -745,6 +686,9 @@ def _upsert_local_agent(
                 resolved_status,
                 resolved_work_status,
                 resolved_task,
+                resolved_priority,
+                consent_json,
+                track_info_json,
                 resolved_last_update,
                 resolved_launch_time,
                 resolved_offline_time,
@@ -820,6 +764,219 @@ def _remove_local_task(task_id: str) -> None:
         conn.close()
 
 
+def _delete_local_agent(agent_id: str) -> None:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM tasks WHERE agent_id = ?", (normalized_agent_id,))
+        cursor.execute("DELETE FROM agents WHERE agent_id = ?", (normalized_agent_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _remove_agent_control_task_snapshots(agent_id: str, timestamp: Optional[str] = None) -> None:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return
+
+    for registry_task_id, metadata in list(task_control_registry.items()):
+        agent_ids = [
+            str(existing_agent_id)
+            for existing_agent_id in metadata.get("agent_ids", [])
+            if str(existing_agent_id) != normalized_agent_id
+        ]
+        if agent_ids:
+            agent_names = dict(metadata.get("agent_names", {}))
+            agent_names.pop(normalized_agent_id, None)
+            task_control_registry[registry_task_id] = {
+                **metadata,
+                "agent_ids": agent_ids,
+                "agent_names": agent_names,
+                "updated_at": timestamp or metadata.get("updated_at"),
+            }
+        else:
+            task_control_registry.pop(registry_task_id, None)
+
+    control_task_history[:] = [
+        task
+        for task in control_task_history
+        if normalized_agent_id
+        not in {str(agent.get("id") or "") for agent in task.get("involvedAgents", [])}
+    ]
+
+
+def _agent_has_processing_tasks(agent_id: str) -> bool:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return False
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT 1
+            FROM tasks
+            WHERE agent_id = ? AND status = 'processing'
+            LIMIT 1
+            """,
+            (normalized_agent_id,),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _get_agent_processing_task_count(agent_id: str) -> int:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return 0
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(DISTINCT task_id)
+            FROM tasks
+            WHERE agent_id = ? AND status = 'processing'
+            """,
+            (normalized_agent_id,),
+        )
+        return int(cursor.fetchone()[0] or 0)
+    finally:
+        conn.close()
+
+
+def _get_agent_tasks(agent_id: str) -> List[Dict[str, str]]:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return []
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT task_id, task_description, task_name, task_type, status, created_at, updated_at
+            FROM tasks
+            WHERE agent_id = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (normalized_agent_id,),
+        )
+        rows = cursor.fetchall()
+        return [
+            {
+                "taskId": str(row["task_id"] or ""),
+                "taskName": str(row["task_name"] or row["task_type"] or row["task_id"] or ""),
+                "taskType": str(row["task_type"] or ""),
+                "description": str(row["task_description"] or ""),
+                "status": str(row["status"] or "processing"),
+                "createdAt": str(row["created_at"] or ""),
+                "updatedAt": str(row["updated_at"] or ""),
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def _sync_agent_work_status_from_tasks(
+    agent_id: str,
+    *,
+    timestamp: Optional[str] = None,
+    current_task: Optional[str] = None,
+) -> None:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return
+    has_processing_tasks = _agent_has_processing_tasks(normalized_agent_id)
+    _upsert_local_agent(
+        normalized_agent_id,
+        work_status="working" if has_processing_tasks else "idle",
+        current_task=current_task if has_processing_tasks else "",
+        last_update=timestamp,
+    )
+
+
+def _get_agent_track_info(agent_id: str) -> List[Dict[str, Any]]:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return []
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT track_info FROM agents WHERE agent_id = ?",
+            (normalized_agent_id,),
+        )
+        row = cursor.fetchone()
+        if not row or not row["track_info"]:
+            return []
+        parsed = json.loads(row["track_info"])
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def _track_info_key(track: Dict[str, Any]) -> tuple[str, str, str]:
+    return (
+        str(track.get("task_id") or track.get("taskId") or ""),
+        str(track.get("namespace") or ""),
+        str(track.get("track") or track.get("trackName") or ""),
+    )
+
+
+def _update_agent_track_info(
+    agent_id: str,
+    *,
+    task_id: str,
+    track_list: List[Dict[str, Any]],
+    remove: bool,
+    timestamp: Optional[str],
+) -> List[Dict[str, Any]]:
+    normalized_agent_id = str(agent_id or "").strip()
+    if not normalized_agent_id:
+        return []
+
+    current_tracks = _get_agent_track_info(normalized_agent_id)
+    next_by_key = {_track_info_key(track): dict(track) for track in current_tracks}
+
+    for track in track_list:
+        if not isinstance(track, dict):
+            continue
+        namespace = track.get("namespace", "")
+        if isinstance(namespace, list):
+            namespace = "/".join(str(part).strip("/") for part in namespace if part)
+        namespace_value = str(namespace or "")
+        track_name = str(track.get("track") or track.get("trackName") or "")
+        if not namespace_value and not track_name:
+            continue
+        record = {
+            "task_id": str(task_id or ""),
+            "namespace": namespace_value,
+            "track": track_name,
+            "updated_at": str(timestamp or datetime.utcnow().isoformat()),
+        }
+        key = _track_info_key(record)
+        if remove:
+            next_by_key.pop(key, None)
+        else:
+            next_by_key[key] = record
+
+    next_tracks = list(next_by_key.values())
+    _upsert_local_agent(
+        normalized_agent_id,
+        track_info=next_tracks,
+        last_update=timestamp,
+    )
+    return next_tracks
+
+
 def _record_local_log(
     source_kind: str,
     summary: str,
@@ -876,6 +1033,9 @@ def _prime_local_cache_from_runtime_state() -> None:
             agent_capability=cached.get("agent_capability")
             if isinstance(cached.get("agent_capability"), list)
             else None,
+            priority=cached.get("priority"),
+            consent=cached.get("consent") if isinstance(cached.get("consent"), dict) else None,
+            track_info=cached.get("track_info") if isinstance(cached.get("track_info"), list) else None,
             last_update=cached.get("last_update"),
             launch_time=cached.get("launch_time"),
             offline_time=cached.get("offline_time"),
@@ -907,18 +1067,6 @@ def _insert_task_record(
     created_at: Optional[str] = None,
     updated_at: Optional[str] = None,
 ) -> None:
-    if should_use_external_db():
-        conn = _connect_external_db_writable(get_external_db_path())
-        try:
-            cursor = conn.cursor()
-            cursor.execute(
-                "INSERT INTO tasks (agent_id, task_id, task_description) VALUES (?, ?, ?)",
-                (agent_id, task_id, task_description),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
     _upsert_local_task(
         task_id,
         agent_id,
@@ -932,15 +1080,6 @@ def _insert_task_record(
 
 
 def _delete_task_records(task_id: str) -> None:
-    if should_use_external_db():
-        conn = _connect_external_db_writable(get_external_db_path())
-        try:
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
-            conn.commit()
-        finally:
-            conn.close()
-
     _remove_local_task(task_id)
 
 
@@ -1090,9 +1229,6 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-# Set connection manager for video stream manager
-video_stream_manager.set_connection_manager(manager)
-
 
 def _list_all_video_tracks() -> List[Dict[str, Any]]:
     tracks: List[Dict[str, Any]] = []
@@ -1241,11 +1377,17 @@ def _parse_agent_rows(
         else:
             agent["agent_capability"] = []
 
-        original_status = agent.get("agent_status", "offline")
-        if agent.get("agent_id") in agents_with_tasks:
-            agent["agent_status"] = "working"
-        else:
-            agent["agent_status"] = original_status if original_status else "offline"
+        for json_field, default_value in (("consent", {}), ("track_info", [])):
+            if agent.get(json_field):
+                try:
+                    agent[json_field] = json.loads(agent[json_field])
+                except Exception:
+                    agent[json_field] = default_value
+            else:
+                agent[json_field] = default_value
+
+        if not agent.get("agent_status"):
+            agent["agent_status"] = "offline"
 
         agents.append(agent)
     return agents
@@ -1262,27 +1404,23 @@ def _group_task_rows(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
                 "id": task_id,
                 "description": entry.get("task_description") or "",
                 "agent_ids": [],
+                "status": entry.get("status") or "processing",
+                "task_name": entry.get("task_name") or "",
+                "task_type": entry.get("task_type") or "",
+                "created_at": entry.get("created_at") or "",
+                "updated_at": entry.get("updated_at") or "",
             },
         )
+        if entry.get("status") == "processing":
+            task["status"] = "processing"
         agent_id = entry.get("agent_id")
         if agent_id and agent_id not in task["agent_ids"]:
             task["agent_ids"].append(agent_id)
         if not task["description"] and entry.get("task_description"):
             task["description"] = entry["task_description"]
+        if entry.get("updated_at") and str(entry["updated_at"]) > str(task.get("updated_at") or ""):
+            task["updated_at"] = entry["updated_at"]
     return list(grouped.values())
-
-
-def _get_agents_from_external_db(path: str) -> List[Dict[str, Any]]:
-    conn = _connect_external_db_readonly(path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM agents")
-        rows = cursor.fetchall()
-        cursor.execute("SELECT DISTINCT agent_id FROM tasks")
-        agents_with_tasks = {row[0] for row in cursor.fetchall()}
-        return _parse_agent_rows(rows, agents_with_tasks)
-    finally:
-        conn.close()
 
 
 def _get_agents_from_local_db() -> List[Dict[str, Any]]:
@@ -1291,7 +1429,7 @@ def _get_agents_from_local_db() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT agent_id, agent_name, agent_capability, agent_status, work_status, current_task, last_update, launch_time, offline_time
+            SELECT agent_id, agent_name, agent_capability, agent_status, work_status, current_task, priority, consent, track_info, last_update, launch_time, offline_time
             FROM agents
             ORDER BY updated_at DESC
             """
@@ -1305,28 +1443,12 @@ def _get_agents_from_local_db() -> List[Dict[str, Any]]:
 
 
 def get_agents_from_db() -> List[Dict[str, Any]]:
-    """Get agents from the configured source, with local-cache fallback."""
-    if should_use_external_db():
-        try:
-            return _get_agents_from_external_db(get_external_db_path())
-        except Exception as e:
-            print(f"[Database Error] {e}")
-            return _get_agents_from_local_db()
+    """Get agents from the WebUI local cache."""
     try:
         return _get_agents_from_local_db()
     except Exception as e:
         print(f"[Local Database Error] {e}")
         return []
-
-
-def _get_task_count_from_external_db(path: str) -> int:
-    conn = _connect_external_db_readonly(path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM tasks")
-        return int(cursor.fetchone()[0] or 0)
-    finally:
-        conn.close()
 
 
 def _get_task_count_from_local_db() -> int:
@@ -1340,34 +1462,12 @@ def _get_task_count_from_local_db() -> int:
 
 
 def get_task_count_from_db() -> int:
-    """Get total task count from the configured source."""
+    """Get active task count from the WebUI local cache."""
     try:
-        if should_use_external_db():
-            return _get_task_count_from_external_db(get_external_db_path())
         return _get_task_count_from_local_db()
     except Exception as e:
         print(f"[Task Count Error] {e}")
-        try:
-            return _get_task_count_from_local_db()
-        except Exception:
-            return 0
-
-
-def _get_tasks_from_external_db(path: str) -> List[Dict[str, Any]]:
-    conn = _connect_external_db_readonly(path)
-    try:
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT id, agent_id, task_id, task_description
-            FROM tasks
-            ORDER BY id DESC
-            """
-        )
-        rows = cursor.fetchall()
-        return _group_task_rows(rows)
-    finally:
-        conn.close()
+        return 0
 
 
 def _get_tasks_from_local_db() -> List[Dict[str, Any]]:
@@ -1376,10 +1476,9 @@ def _get_tasks_from_local_db() -> List[Dict[str, Any]]:
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT id, agent_id, task_id, task_description
+            SELECT id, agent_id, task_id, task_description, task_name, task_type, status, created_at, updated_at
             FROM tasks
-            WHERE status = 'processing'
-            ORDER BY id DESC
+            ORDER BY updated_at DESC, id DESC
             """
         )
         rows = cursor.fetchall()
@@ -1389,17 +1488,12 @@ def _get_tasks_from_local_db() -> List[Dict[str, Any]]:
 
 
 def get_tasks_from_db() -> List[Dict[str, Any]]:
-    """Get active tasks from the configured source, with local-cache fallback."""
+    """Get tasks from the WebUI local cache."""
     try:
-        if should_use_external_db():
-            return _get_tasks_from_external_db(get_external_db_path())
         return _get_tasks_from_local_db()
     except Exception as e:
         print(f"[Task Query Error] {e}")
-        try:
-            return _get_tasks_from_local_db()
-        except Exception:
-            return []
+        return []
 
 
 def _extract_task_type(description: str) -> Optional[str]:
@@ -1455,6 +1549,7 @@ def build_control_tasks_snapshot(limit_finished: int = 20) -> List[Dict[str, Any
     for task in get_tasks_from_db():
         task_id = str(task["id"])
         metadata = task_control_registry.get(task_id, {})
+        task_status = str(task.get("status") or metadata.get("status") or "processing")
         description = str(
             task.get("description")
             or metadata.get("task_description")
@@ -1462,25 +1557,30 @@ def build_control_tasks_snapshot(limit_finished: int = 20) -> List[Dict[str, Any
         )
         task_type = str(
             metadata.get("task_type")
+            or task.get("task_type")
             or _extract_task_type(description)
             or "General"
         )
         created_at = str(
             metadata.get("created_at")
+            or task.get("created_at")
             or metadata.get("updated_at")
             or datetime.utcnow().isoformat()
         )
-        updated_at = str(metadata.get("updated_at") or created_at)
+        updated_at = str(metadata.get("updated_at") or task.get("updated_at") or created_at)
 
         active_tasks.append(
             {
                 "id": task_id,
                 "taskName": str(
-                    metadata.get("task_name") or task_type or f"Task {task_id[-6:]}"
+                    metadata.get("task_name")
+                    or task.get("task_name")
+                    or task_type
+                    or f"Task {task_id[-6:]}"
                 ),
                 "taskType": task_type,
                 "description": description,
-                "status": "processing",
+                "status": task_status,
                 "involvedAgents": _build_task_involved_agents(
                     task.get("agent_ids", []), name_lookup, metadata
                 ),
@@ -1528,7 +1628,11 @@ def build_control_tasks_snapshot(limit_finished: int = 20) -> List[Dict[str, Any
         )
 
     active_tasks.sort(key=lambda item: item["updatedAt"], reverse=True)
-    finished_tasks = list(reversed(control_task_history[-limit_finished:]))
+    finished_tasks = [
+        task
+        for task in reversed(control_task_history[-limit_finished:])
+        if str(task.get("id")) not in seen_task_ids
+    ]
     return active_tasks + finished_tasks
 
 
@@ -1602,6 +1706,9 @@ def _default_agent_cache_entry(agent_id: str, agent_name: Optional[str] = None) 
         "logs": [],
         "agent_status": "online",
         "agent_capability": [],
+        "priority": "",
+        "consent": {},
+        "track_info": [],
         "last_update": None,
         "launch_time": None,
         "offline_time": None,
@@ -1616,6 +1723,9 @@ def _ensure_agent_cache_entry(agent_id: str, agent_name: Optional[str] = None) -
     )
     entry.setdefault("logs", [])
     entry.setdefault("agent_capability", [])
+    entry.setdefault("priority", "")
+    entry.setdefault("consent", {})
+    entry.setdefault("track_info", [])
     entry.setdefault("launch_time", None)
     entry.setdefault("offline_time", None)
     if agent_name:
@@ -2203,7 +2313,7 @@ def _merge_cached_agent_fields(
             combined[field] = cached_agent[field]
 
     # Helpful metadata that may only exist in live log payloads.
-    for field in ("owner", "network_capability"):
+    for field in ("owner", "network_capability", "priority", "consent", "track_info"):
         if not combined.get(field) and cached_agent.get(field):
             combined[field] = cached_agent[field]
 
@@ -2298,12 +2408,32 @@ def build_dashboard_agents() -> List[Dict[str, Any]]:
         agent = {**agent, "agent_name": display_name}
         status = _dashboard_status_from_agent(agent)
         capabilities = _normalize_capabilities(agent.get("agent_capability"))
-        logs = agent.get("logs", [])
-        tracks = agent_tracks.get(agent_id, [])
-        track_names = [
-            str(track.get("trackName") or track.get("normalizedTrackName") or "Track")
-            for track in tracks
-        ]
+        processing_task_count = _get_agent_processing_task_count(agent_id)
+        agent_tasks = _get_agent_tasks(agent_id)
+        tracks = list(agent_tracks.get(agent_id, []))
+        for index_in_track_info, track in enumerate(agent.get("track_info") or []):
+            if not isinstance(track, dict):
+                continue
+            namespace = str(track.get("namespace") or "")
+            track_name = str(track.get("track") or track.get("trackName") or "Track")
+            task_id = str(track.get("task_id") or track.get("taskId") or "")
+            track_key = f"agent-track-info-{agent_id}-{task_id}-{namespace}-{track_name}-{index_in_track_info}"
+            tracks.append(
+                {
+                    "trackId": track_key,
+                    "trackName": track_name,
+                    "normalizedTrackName": track_name.lower(),
+                    "taskId": task_id,
+                    "namespace": namespace,
+                    "watchState": "available",
+                    "lastSeen": str(track.get("updated_at") or agent.get("last_update") or ""),
+                }
+            )
+        track_names = []
+        for track in tracks:
+            namespace = str(track.get("namespace") or "").strip("/")
+            track_name = str(track.get("trackName") or track.get("normalizedTrackName") or "Track")
+            track_names.append(f"{namespace}/{track_name}" if namespace else track_name)
         launch_time = agent.get("launch_time") or agent.get("last_update")
         offline_time = agent.get("offline_time") if status == "offline" else None
 
@@ -2313,6 +2443,7 @@ def build_dashboard_agents() -> List[Dict[str, Any]]:
                 "name": display_name,
                 "role": _dashboard_role_from_agent(agent),
                 "status": status,
+                "priority": str(agent.get("priority") or "--"),
                 "region": _dashboard_region_from_agent(agent),
                 "trackSummary": _dashboard_track_summary(track_names),
                 "tracks": [
@@ -2335,11 +2466,12 @@ def build_dashboard_agents() -> List[Dict[str, Any]]:
                 if status == "offline"
                 else _format_elapsed_since(launch_time),
                 "launchTime": _format_timestamp_display(launch_time),
-                "offlineTime": _format_timestamp_display(offline_time),
+                "offlineTime": _format_timestamp_display(offline_time) if offline_time else "--",
                 "lastHeartbeat": _format_relative_time(
                     agent.get("last_update") or datetime.utcnow().isoformat()
                 ),
-                "taskCount": max(len(logs), 1 if status == "busy" else 0),
+                "taskCount": processing_task_count,
+                "tasks": agent_tasks,
                 "capabilities": capabilities or ["General connectivity"],
                 "alerts": _dashboard_alerts_from_agent(agent),
                 "position": _dashboard_position(index),
@@ -2985,14 +3117,6 @@ def _clear_local_demo_state():
         task for task in control_task_history if not task.get("isDemo")
     ]
 
-    demo_task_prefixes = ("demo-task-", "demo-alpha-", "demo-beta-", "demo-finished-")
-    stale_task_keys = [
-        task_id for task_id in task_agent_mapping.keys() if str(task_id).startswith(demo_task_prefixes)
-    ]
-    for task_id in stale_task_keys:
-        task_agent_mapping.pop(task_id, None)
-
-
 async def run_full_system_test_demo(
     rounds: int = 1, step_delay_seconds: float = 0.22, stages: Optional[List[str]] = None
 ) -> Dict[str, Any]:
@@ -3203,90 +3327,9 @@ async def call_arf_clear() -> Dict[str, Any]:
         return {"success": False, "error": str(e)}
 
 
-# Video frame handler for MOQ
-async def handle_moq_video_frame(frame: "VideoFrame"):
-    """Broadcast MOQ bridge segments to WebUI clients."""
-    payload: Dict[str, Any] = {
-        "track_id": frame.track_name,
-        "group_id": frame.group_id,
-        "object_id": frame.object_id,
-        "timestamp": frame.timestamp.isoformat(),
-        "frame_type": frame.frame_type,
-        "payload_size": len(frame.payload),
-    }
-
-    if frame.frame_type == "metadata":
-        try:
-            payload["metadata"] = json.loads(frame.payload.decode("utf-8"))
-        except Exception:
-            payload["metadata"] = None
-            payload["payload_base64"] = base64.b64encode(frame.payload).decode("ascii")
-    elif frame.payload:
-        payload["payload_base64"] = base64.b64encode(frame.payload).decode("ascii")
-
-    await manager.broadcast(
-        {
-            "type": "VIDEO_SEGMENT",
-            "payload": payload,
-        }
-    )
-
-
 def on_moq_track_subscribed(track_id: str):
     """Handler for MOQ track subscribed"""
     print(f"[MOQ] Track subscribed: {track_id}")
-
-
-def _infer_moq_mime_type(payload: bytes) -> str:
-    """Infer a browser-friendly MIME type from MOQ payload bytes."""
-    if payload.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if payload.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if payload.startswith(b"GIF87a") or payload.startswith(b"GIF89a"):
-        return "image/gif"
-    if payload.startswith(b"RIFF") and len(payload) >= 12 and payload[8:12] == b"WEBP":
-        return "image/webp"
-    if _looks_like_h264(payload):
-        return "video/h264"
-
-    # Default to octet-stream so the frontend can decide whether to render
-    # the frame or fall back to a placeholder.
-    return "application/octet-stream"
-
-
-def _looks_like_h264(payload: bytes) -> bool:
-    """Best-effort detection for Annex B H.264 payloads."""
-    if len(payload) < 5:
-        return False
-
-    start_code_len = 0
-    if payload.startswith(b"\x00\x00\x00\x01"):
-        start_code_len = 4
-    elif payload.startswith(b"\x00\x00\x01"):
-        start_code_len = 3
-    else:
-        if len(payload) < 8:
-            return False
-        nal_length = int.from_bytes(payload[0:4], "big")
-        if nal_length <= 0 or nal_length + 4 > len(payload):
-            return False
-        nal_type = payload[4] & 0x1F
-        return nal_type in {1, 5, 6, 7, 8}
-
-    nal_header_index = start_code_len
-    if nal_header_index >= len(payload):
-        return False
-
-    nal_type = payload[nal_header_index] & 0x1F
-    return nal_type in {1, 5, 6, 7, 8}
-
-
-def _infer_moq_codec(payload: bytes) -> str | None:
-    """Infer a codec hint for browser-side rendering."""
-    if _looks_like_h264(payload):
-        return "h264"
-    return None
 
 
 # Lifespan context
@@ -3311,7 +3354,6 @@ async def lifespan(app: FastAPI):
         print("[MOQ] Starting video subscriber...")
         try:
             moq_video_subscriber.set_callbacks(
-                on_frame_received=handle_moq_video_frame,
                 on_track_subscribed=on_moq_track_subscribed,
             )
             await moq_video_subscriber.start()
@@ -3380,60 +3422,6 @@ async def health_check():
         "timestamp": datetime.utcnow().isoformat(),
         "websocket_clients": len(manager.active_connections),
     }
-
-
-def _get_data_source_status() -> Dict[str, Any]:
-    settings = get_data_source_settings()
-    external_path = get_external_db_path()
-    external_exists = Path(external_path).exists()
-    local_exists = LOCAL_CACHE_DB_PATH.exists()
-    active_source = "external" if should_use_external_db() else "local"
-    if should_use_external_db() and not external_exists:
-        active_source = "local-fallback"
-
-    return {
-        "useExternalDb": bool(settings["useExternalDb"]),
-        "externalDbPath": external_path,
-        "externalDbExists": external_exists,
-        "localDbPath": get_local_cache_db_path(),
-        "localDbExists": local_exists,
-        "activeSource": active_source,
-    }
-
-
-@app.get("/api/settings/data-source")
-async def get_data_source_config():
-    """Return the current database source configuration."""
-    return {
-        "status": "success",
-        "config": _get_data_source_status(),
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/settings/data-source")
-async def update_data_source_config(request: Dict[str, Any]):
-    """Update the database source configuration."""
-    use_external = bool(request.get("useExternalDb", True))
-    external_path = str(request.get("externalDbPath") or EXTERNAL_DB_DEFAULT_PATH).strip()
-    data_source_settings.update(
-        _save_data_source_settings(
-            {"useExternalDb": use_external, "externalDbPath": external_path}
-        )
-    )
-    ensure_local_cache_db()
-    _prime_local_cache_from_runtime_state()
-    dashboard = build_dashboard_snapshot()
-    tasks = build_control_tasks_snapshot()
-    payload = {
-        "config": _get_data_source_status(),
-        "dashboard": dashboard,
-        "tasks": tasks,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-    await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
-    await manager.broadcast({"type": "TASKS_UPDATED", "payload": payload})
-    return {"status": "success", **payload}
 
 
 @app.post("/api/settings/virtual-agents")
@@ -3829,7 +3817,6 @@ async def clear_environment():
         )
 
     agent_status_cache.clear()
-    task_agent_mapping.clear()
     pipeline_log_buffer.clear()
     network_element_log_cutoffs.clear()
     network_element_log_cutoffs.update(_snapshot_network_element_log_cutoffs())
@@ -4331,7 +4318,6 @@ async def _start_or_switch_moq_subscription(
 
     host = request.url.hostname or "127.0.0.1"
     player = moq_video_subscriber.get_player_config(track_id, host=host)
-    player["mjpegUrl"] = f"/api/video/stream/{quote(track_id, safe='')}/mjpeg"
     updated_track = moq_video_subscriber.get_discovered_track(track_id)
 
     await _broadcast_video_tracks()
@@ -4375,265 +4361,6 @@ async def delete_moq_track(track_id: str):
         "trackId": track_id,
         "timestamp": datetime.utcnow().isoformat(),
     }
-
-
-@app.get("/api/video/stream/{track_id}/mjpeg")
-async def stream_moq_video_as_mjpeg(track_id: str, request: Request):
-    """Serve a watched track as MJPEG over HTTP."""
-    if not MOQ_AVAILABLE:
-        raise HTTPException(status_code=503, detail="MOQ not available")
-
-    async def generate():
-        last_fragment_count = -1
-        last_jpeg_sequence = -1
-        last_keepalive = asyncio.get_running_loop().time()
-
-        while True:
-            if await request.is_disconnected():
-                break
-
-            status = moq_video_subscriber.get_mjpeg_track_status(track_id)
-            fragment_count = int(status.get("fragment_count") or 0)
-            jpeg_sequence = int(status.get("jpeg_sequence") or 0)
-            jpeg_bytes = None
-            if jpeg_sequence > 0 and jpeg_sequence != last_jpeg_sequence:
-                jpeg_bytes = await moq_video_subscriber.get_latest_jpeg_frame(track_id)
-
-            if jpeg_bytes:
-                last_fragment_count = fragment_count
-                last_jpeg_sequence = jpeg_sequence
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n"
-                    b"Content-Length: "
-                    + str(len(jpeg_bytes)).encode("ascii")
-                    + b"\r\n\r\n"
-                    + jpeg_bytes
-                    + b"\r\n"
-                )
-                continue
-
-            now = asyncio.get_running_loop().time()
-            if now - last_keepalive >= 10:
-                last_keepalive = now
-                yield b": keepalive\n\n"
-
-            await asyncio.sleep(0.05)
-
-    return StreamingResponse(
-        generate(),
-        media_type="multipart/x-mixed-replace; boundary=frame",
-        headers={
-            "Cache-Control": "no-cache, no-store, must-revalidate",
-            "Pragma": "no-cache",
-            "Expires": "0",
-        },
-    )
-
-
-@app.get("/api/video/stream/{track_id}/latest")
-async def get_latest_moq_video_frame(track_id: str):
-    """Return the latest MJPEG frame snapshot for a watched track."""
-    if not MOQ_AVAILABLE:
-        raise HTTPException(status_code=503, detail="MOQ not available")
-
-    jpeg_bytes = await moq_video_subscriber.get_latest_jpeg_frame(track_id)
-    if not jpeg_bytes:
-        raise HTTPException(status_code=404, detail="No frame available")
-
-    return Response(
-        content=jpeg_bytes,
-        media_type="image/jpeg",
-        headers={"Cache-Control": "no-cache"},
-    )
-
-
-@app.get("/api/video/stream/{track_id}/info")
-async def get_moq_video_stream_info(track_id: str):
-    """Get the current MJPEG playback state for a watched track."""
-    if not MOQ_AVAILABLE:
-        return {
-            "track_id": track_id,
-            "status": "unavailable",
-            "has_frame": False,
-            "metadata": None,
-        }
-
-    info = moq_video_subscriber.get_mjpeg_track_status(track_id)
-    return {
-        **info,
-        "timestamp": datetime.utcnow().isoformat(),
-    }
-
-
-@app.post("/api/acn/v3/subscribe_track")
-async def subscribe_tracks_from_acf(request: Request):
-    """
-    Receive track list from ACF and auto-subscribe to video tracks
-
-    Request body format:
-    {
-        "method": "POST",
-        "url": "/ACN_v3/subscribe_track",
-        "headers": {"Content-Type": "application/json"},
-        "body": {
-            "type": "SUBSCRIBE_TRACK",
-            "timestamp": "2026-04-13T10:20:30Z",
-            "payload": {
-                "src_agent_id": "ACF",
-                "dst_agent_id": "did:acn:agent:222222222",
-                "task_id": "task-12345",
-                "track_list": [
-                    {"namespace": "/task-12345/did:acn:agent:222222222", "track": "Video"},
-                    {"namespace": "/task-12345/did:acn:agent:222222222", "track": "Location"}
-                ]
-            }
-        }
-    }
-    """
-    try:
-        raw_body = await request.body()
-        body_text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
-
-        # Extract body (support both direct and nested formats)
-        body: Dict[str, Any] = {}
-        if raw_body:
-            try:
-                parsed = await request.json()
-                if isinstance(parsed, dict):
-                    body = parsed
-                elif isinstance(parsed, list):
-                    body = {"track_list": parsed}
-                else:
-                    body = {"payload": parsed}
-            except Exception:
-                # Fall back to text for non-JSON payloads.
-                body = {"raw_body": body_text}
-
-        if "body" in body and isinstance(body["body"], dict):
-            body = body["body"]
-
-        payload = body.get("payload", body)
-        if not isinstance(payload, dict):
-            payload = {}
-
-        track_list = (
-            payload.get("track_list")
-            or payload.get("tracklist")
-            or payload.get("trackList")
-            or payload.get("tracks")
-            or body.get("track_list")
-            or body.get("tracklist")
-            or body.get("trackList")
-            or body.get("tracks")
-            or []
-        )
-        if not isinstance(track_list, list):
-            track_list = []
-
-        dst_agent_id = (
-            payload.get("dst_agent_id") or body.get("dst_agent_id") or "unknown"
-        )
-        task_id = payload.get("task_id") or body.get("task_id") or "unknown"
-
-        print(
-            f"[Subscribe Track] Received {len(track_list)} tracks for agent {dst_agent_id}, task {task_id}"
-        )
-        if body_text:
-            print(f"[Subscribe Track] Raw body: {body_text}")
-        add_log_entry(
-            f"ACF subscribe_track received: agent={dst_agent_id} task={task_id} tracks={len(track_list)}",
-            "info",
-        )
-
-        if not MOQ_AVAILABLE:
-            return {
-                "status": "error",
-                "message": "MOQ not available",
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-        # Filter video tracks and register them for later on-demand watch
-        video_tracks = []
-
-        for track_info in track_list:
-            if not isinstance(track_info, dict):
-                continue
-
-            namespace_str = track_info.get("namespace", "")
-            track_name = track_info.get("track", "")
-            if not isinstance(namespace_str, str):
-                namespace_str = "/".join(str(part) for part in namespace_str if part)
-            if not isinstance(track_name, str):
-                track_name = str(track_name)
-
-            # Check if it's a video track (case-insensitive)
-            normalized_track_name = track_name.lower()
-            if normalized_track_name in ["video", "camera", "thermal"]:
-                # Parse namespace (e.g., "/task-12345/did:acn:agent:222222222")
-                namespace_parts = [p for p in namespace_str.split("/") if p]
-
-                # Create track_id
-                track_id = f"{dst_agent_id}_{task_id}_{normalized_track_name}"
-
-                print(
-                    f"[Subscribe Track] Registering video track: {track_id}, namespace: {namespace_parts}, track: {track_name}"
-                )
-                add_log_entry(
-                    f"MOQ track discovered: track_id={track_id} namespace={namespace_str} track={track_name}",
-                    "info",
-                )
-
-                track_record = moq_video_subscriber.register_discovered_track(
-                    track_id=track_id,
-                    namespace=namespace_parts,
-                    track_name=track_name,
-                    agent_id=dst_agent_id,
-                    task_id=task_id,
-                )
-
-                video_tracks.append(track_record)
-
-        # Broadcast to frontend about new video tracks
-        if video_tracks:
-            await manager.broadcast(
-                {
-                    "type": "VIDEO_TRACKS_AVAILABLE",
-                    "payload": {
-                        "agent_id": dst_agent_id,
-                        "task_id": task_id,
-                        "tracks": video_tracks,
-                        "timestamp": datetime.utcnow().isoformat(),
-                    },
-                }
-            )
-
-        add_log_entry(
-            f"ACF -> Monitor: Discovered {len(video_tracks)} video tracks for {dst_agent_id}",
-            "info",
-        )
-
-        return {
-            "status": "success",
-            "agent_id": dst_agent_id,
-            "task_id": task_id,
-            "total_tracks": len(track_list),
-            "video_tracks": video_tracks,
-            "discovered_count": len(video_tracks),
-            "subscription_debug": moq_video_subscriber.get_track_debug_info(),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    except Exception as e:
-        print(f"[Subscribe Track Error] {e}")
-        import traceback
-
-        traceback.print_exc()
-        return {
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
 
 
 @app.post("/acn/v3/pipeline-logs")
@@ -4690,143 +4417,6 @@ async def receive_pipeline_log(request: Dict[str, Any]):
         # Broadcast to all connected WebSocket clients
         await manager.broadcast(log_message)
 
-        # Update agent status based on abstract
-        abstract = body.get("abstract", "")
-        if abstract:
-            work_status, task_desc = get_work_status_from_abstract(abstract)
-            if work_status != "idle":
-                # Try to extract agent_id from content
-                content = body.get("content", {})
-                if isinstance(content, str):
-                    try:
-                        content = json.loads(content)
-                    except:
-                        content = {}
-
-                agent_id = content.get("agent_id", "")
-                agent_name = content.get("agent_name", content.get("name", ""))
-                task_id = body.get("task_id", "")
-                claim_names = _claim_agent_names_from_content(content, agent_id)
-                if claim_names and (_is_identifier_like_name(agent_name) or not agent_name):
-                    agent_name = claim_names[0]
-
-                # Extract agent_id for internal forwarded messages
-                if not agent_id and abstract in [
-                    "收到/idm/v1/identity-applications请求",
-                    "/idm/v1/identity-applications已转发到IDM",
-                    "收到/arf/v1/agent-cards请求",
-                    "/arf/v1/agent-cards已转发到AgentGW",
-                    "/idm/v1/identity-applications响应返回ACN SDK",
-                    "/idm/v1/identity-applications上游响应返回",
-                    "/arf/v1/agent-cards响应返回ACN SDK",
-                    "/arf/v1/agent-cards上游响应返回",
-                ]:
-                    # Use owner + name to find agent in cache
-                    owner = content.get("owner", "")
-                    name = content.get("name", "")
-                    if name:
-                        for cached_id, cached_data in agent_status_cache.items():
-                            if cached_data.get("agent_name") == name:
-                                agent_id = cached_id
-                                break
-
-                # Extract agent_id from MoQ-related messages
-                if not agent_id:
-                    if abstract == "Publish MoQ track":
-                        namespace = content.get("namespace", "")
-                        if namespace and "did:udid:" in namespace:
-                            parts = namespace.split("/")
-                            for part in parts:
-                                if part.startswith("did:udid:"):
-                                    agent_id = part
-                                    break
-                    elif abstract == "Announce MoQ published track":
-                        payload = content.get("payload", {})
-                        agent_id = payload.get("src_agent_id", "")
-                    elif abstract == "Send MoQ object":
-                        agent_id = task_agent_mapping.get(task_id, "")
-
-                # Update task-agent mapping when we have both
-                if agent_id and task_id:
-                    task_agent_mapping[task_id] = agent_id
-
-                # Fallback: find agent with this task_id in cache
-                if not agent_id and task_id:
-                    for cached_id, cached_data in agent_status_cache.items():
-                        if task_id in str(cached_data):
-                            agent_id = cached_id
-                            agent_name = cached_data.get("agent_name", "")
-                            break
-
-                if agent_id:
-                    timestamp = body.get("timestamp", datetime.utcnow().isoformat())
-                    is_demo = bool(content.get("is_demo"))
-
-                    cache_entry = _ensure_agent_cache_entry(
-                        agent_id,
-                        agent_name=agent_name or agent_id.split(":")[-1][:20],
-                    )
-                    _sync_agent_timeline(
-                        cache_entry,
-                        status="online",
-                        timestamp=timestamp,
-                    )
-                    cache_entry["work_status"] = work_status
-                    cache_entry["current_task"] = task_desc
-                    if is_demo:
-                        cache_entry["is_demo"] = True
-
-                    # Broadcast status update
-                    status_message = {
-                        "type": "AGENT_STATUS_UPDATE",
-                        "payload": {
-                            "agent_id": agent_id,
-                            "agent_name": cache_entry["agent_name"],
-                            "work_status": work_status,
-                            "current_task": task_desc,
-                            "log_type": abstract,
-                            "element_id": body.get("source", "Pipeline"),
-                            "timestamp": timestamp,
-                            "agent": agent_status_cache.get(agent_id, {}),
-                        },
-                    }
-                    print(
-                        f"[Pipeline Status] {abstract} -> Agent: {agent_id[:30]}... | Status: {work_status}"
-                    )
-                    _upsert_local_agent(
-                        agent_id,
-                        agent_name=cache_entry["agent_name"],
-                        agent_status=cache_entry.get("agent_status", "online"),
-                        work_status=work_status,
-                        current_task=task_desc,
-                        agent_capability=cache_entry.get("agent_capability")
-                        if isinstance(cache_entry.get("agent_capability"), list)
-                        else None,
-                        last_update=timestamp,
-                        launch_time=cache_entry.get("launch_time"),
-                        offline_time=cache_entry.get("offline_time"),
-                    )
-                    if task_id:
-                        _upsert_local_task(
-                            task_id,
-                            agent_id,
-                            task_description=task_desc or abstract,
-                            task_name=task_desc or abstract,
-                            task_type=_extract_task_type(task_desc or abstract) or "General",
-                            status="processing",
-                            created_at=timestamp,
-                            updated_at=timestamp,
-                        )
-                    _record_local_log(
-                        "pipeline",
-                        abstract or task_desc,
-                        body,
-                        source_name=body.get("source"),
-                        agent_id=agent_id,
-                        task_id=task_id,
-                    )
-                    await manager.broadcast(status_message)
-
         return {
             "status": "success",
             "message": "Log received and broadcasted",
@@ -4843,72 +4433,12 @@ async def receive_pipeline_log(request: Dict[str, Any]):
 
 # Agent status tracking
 agent_status_cache: Dict[str, Dict[str, Any]] = {}
-# Task to agent mapping for MoQ messages
-task_agent_mapping: Dict[str, str] = {}
-
-
-def get_work_status_from_log_type(log_type: str) -> tuple:
-    """Map log_type to work_status and task description"""
-    status_map = {
-        "ApplyProfile": ("working", "Applying for digital identity"),
-        "PublishAgent": ("working", "Registering agent capabilities"),
-        "SetupConnection": ("online", "Setting up connection"),
-        "LLMMessage": ("working", "Processing LLM message"),
-        "TargetTracking": ("tracking", "Tracking target"),
-        "LocationTracking": ("tracking", "Tracking location"),
-        "VideoTracking": ("tracking", "Tracking video"),
-        "PersonExpelling": ("expelling", "Expelling suspicious person"),
-        "SuspiciousPerson": ("expelling", "Identifying suspicious person"),
-        "EmergencyAlert": ("expelling", "Emergency alert"),
-        "TaskExecution": ("working", "Executing task"),
-        "VideoStream": ("working", "Streaming video"),
-        "LocationUpdate": ("working", "Updating location"),
-    }
-    return status_map.get(log_type, ("idle", "Unknown task"))
-
-
-def get_work_status_from_abstract(abstract: str) -> tuple:
-    """Map pipeline-logs abstract to work_status and task description"""
-    status_map = {
-        "identity-applications": ("working", "Applying for identity"),
-        "Register agent identity": ("working", "Registering identity"),
-        "收到/idm/v1/identity-applications请求": ("working", "Applying for identity"),
-        "/idm/v1/identity-applications已转发到IDM": (
-            "working",
-            "Identity application forwarded",
-        ),
-        "/idm/v1/identity-applications上游响应返回": (
-            "working",
-            "Identity application response",
-        ),
-        "/idm/v1/identity-applications响应返回ACN SDK": (
-            "working",
-            "Identity registered",
-        ),
-        "Agent-cards": ("working", "Publishing agent card"),
-        "vc-verifications": ("working", "VC verification in progress"),
-        "SETUP connection": ("online", "Setting up connection"),
-        "Register agent capabilities": ("working", "Registering capabilities"),
-        "收到/arf/v1/agent-cards请求": ("working", "Publishing agent card"),
-        "/arf/v1/agent-cards已转发到AgentGW": ("working", "Agent card forwarded"),
-        "/arf/v1/agent-cards上游响应返回": ("working", "Agent card response"),
-        "/arf/v1/agent-cards响应返回ACN SDK": ("working", "Capabilities registered"),
-        "Request task execution": ("working", "Executing task"),
-        "Request task collaboration": ("working", "Collaborating"),
-        "Publish MoQ track": ("tracking", "Publishing video track"),
-        "Announce MoQ published track": ("tracking", "Video track published"),
-        "Send MoQ object": ("tracking", "Streaming video data"),
-        "MoQ Connection": ("tracking", "Setting up MoQ relay connection"),
-        "WebSocket setup handshake": ("online", "Setting up connection"),
-    }
-    return status_map.get(abstract, ("idle", abstract))
 
 
 @app.post("/acn/v3/element-logs")
 async def receive_element_log(request: Dict[str, Any]):
     """Receive element log messages and update agent work status"""
     try:
-        # Support both formats: direct or nested in body
         if "body" in request and isinstance(request["body"], dict):
             body = request["body"]
         else:
@@ -4917,20 +4447,16 @@ async def receive_element_log(request: Dict[str, Any]):
         element_id = body.get("element_id", "Unknown")
         log_type = body.get("log_type", "Unknown")
         content = body.get("content", {})
+        if not isinstance(content, dict):
+            content = {}
         timestamp = body.get("timestamp", datetime.utcnow().isoformat())
 
-        # Extract agent_id from content
-        agent_id = content.get("agent_id", "")
-        agent_name = content.get("agent_name", "")
-        claim_names = _claim_agent_names_from_content(content, agent_id)
-        if claim_names and (_is_identifier_like_name(agent_name) or not agent_name):
-            agent_name = claim_names[0]
-        is_demo = bool(content.get("is_demo"))
-
-        # Determine work status based on log_type
-        work_status, task_desc = get_work_status_from_log_type(log_type)
-
-        # Create log entry
+        agent_id = str(
+            content.get("agent_id") or content.get("src_agent_id") or ""
+        ).strip()
+        task_id = str(content.get("task_id") or body.get("task_id") or "").strip()
+        task_description = str(content.get("task_description") or "").strip()
+        summary = f"{log_type}: {task_description or agent_id or task_id or 'received'}"
         log_entry = {
             "time": datetime.fromisoformat(timestamp.replace("Z", "+00:00")).strftime(
                 "%H:%M:%S"
@@ -4938,83 +4464,144 @@ async def receive_element_log(request: Dict[str, Any]):
             if "T" in timestamp
             else datetime.now().strftime("%H:%M:%S"),
             "level": "info",
-            "message": f"{log_type}: {task_desc}",
+            "message": summary,
         }
 
-        # Add to log buffer
-        add_log_entry(f"[{element_id}] {agent_id}: {log_type} - {task_desc}", "info")
+        add_log_entry(f"[{element_id}] {agent_id}: {summary}", "info")
         _record_local_log(
             "element",
-            f"{log_type}: {task_desc}",
+            summary,
             body,
             source_name=element_id,
             agent_id=agent_id,
-            task_id=body.get("task_id") or content.get("task_id"),
+            task_id=task_id,
         )
 
-        # Update agent status cache
-        if agent_id:
-            cache_entry = _ensure_agent_cache_entry(
-                agent_id,
-                agent_name=agent_name or agent_id.split(":")[-1][:20],
+        if log_type == "PublishAgent" and agent_id:
+            agent_name = str(content.get("agent_name") or agent_id).strip()
+            raw_capability = content.get("agent_capability", [])
+            agent_capability = (
+                raw_capability
+                if isinstance(raw_capability, list)
+                else [raw_capability] if raw_capability else []
             )
-            if content.get("agent_capability") and not cache_entry.get("agent_capability"):
-                cache_entry["agent_capability"] = (
-                    content.get("agent_capability", [])
-                    if isinstance(content.get("agent_capability"), list)
-                    else [content.get("agent_capability", "")]
-                )
-            _sync_agent_timeline(
-                cache_entry,
-                status="online",
-                timestamp=timestamp,
-            )
-            cache_entry["work_status"] = work_status
-            cache_entry["current_task"] = task_desc
-            if is_demo:
-                cache_entry["is_demo"] = True
-
+            agent_status = str(content.get("agent_status") or "offline").strip()
+            cache_entry = _ensure_agent_cache_entry(agent_id, agent_name=agent_name)
+            _sync_agent_timeline(cache_entry, status=agent_status, timestamp=timestamp)
+            cache_entry["agent_name"] = agent_name
+            cache_entry["agent_capability"] = agent_capability
+            cache_entry["agent_status"] = agent_status
+            cache_entry["priority"] = str(content.get("priority") or "")
+            cache_entry["consent"] = content.get("consent") if isinstance(content.get("consent"), dict) else {}
+            cache_entry["work_status"] = "working" if _agent_has_processing_tasks(agent_id) else "idle"
+            cache_entry["current_task"] = cache_entry.get("current_task") if cache_entry["work_status"] == "working" else ""
+            cache_entry["logs"].append(log_entry)
+            cache_entry["logs"] = cache_entry["logs"][-10:]
             _upsert_local_agent(
                 agent_id,
-                agent_name=cache_entry["agent_name"],
-                agent_status=cache_entry.get("agent_status", "online"),
-                work_status=work_status,
-                current_task=task_desc,
-                agent_capability=cache_entry.get("agent_capability")
-                if isinstance(cache_entry.get("agent_capability"), list)
-                else None,
+                agent_name=agent_name,
+                agent_status=agent_status,
+                work_status=cache_entry["work_status"],
+                current_task=cache_entry["current_task"],
+                agent_capability=agent_capability,
+                priority=cache_entry["priority"],
+                consent=cache_entry["consent"],
                 last_update=timestamp,
                 launch_time=cache_entry.get("launch_time"),
                 offline_time=cache_entry.get("offline_time"),
             )
-            element_task_id = str(body.get("task_id") or content.get("task_id") or "").strip()
-            if element_task_id:
-                _upsert_local_task(
-                    element_task_id,
-                    agent_id,
-                    task_description=task_desc,
-                    task_name=task_desc,
-                    task_type=log_type,
-                    status="processing",
-                    created_at=timestamp,
-                    updated_at=timestamp,
+
+        elif log_type == "DeleteAgent" and agent_id:
+            _delete_local_agent(agent_id)
+            agent_status_cache.pop(agent_id, None)
+            _remove_agent_control_task_snapshots(agent_id, timestamp)
+
+        elif log_type in {"TaskExecution", "TaskExecutionTermination"} and agent_id and task_id:
+            status = "processing" if log_type == "TaskExecution" else "finished"
+            description = task_description or ("Executing task" if status == "processing" else "Task execution finished")
+            _upsert_local_task(
+                task_id,
+                agent_id,
+                task_description=description,
+                task_name=description,
+                task_type=log_type,
+                status=status,
+                created_at=timestamp,
+                updated_at=timestamp,
+            )
+            existing_task_metadata = task_control_registry.get(task_id, {})
+            existing_agent_ids = [
+                str(existing_agent_id)
+                for existing_agent_id in existing_task_metadata.get("agent_ids", [])
+                if existing_agent_id
+            ]
+            if agent_id not in existing_agent_ids:
+                existing_agent_ids.append(agent_id)
+            existing_agent_names = dict(existing_task_metadata.get("agent_names", {}))
+            existing_agent_names[agent_id] = agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)
+            task_control_registry[task_id] = {
+                **existing_task_metadata,
+                "task_name": description,
+                "task_type": log_type,
+                "task_description": description,
+                "created_at": existing_task_metadata.get("created_at") or timestamp,
+                "updated_at": timestamp,
+                "status": status,
+                "agent_ids": existing_agent_ids,
+                "agent_names": existing_agent_names,
+            }
+            if status == "finished":
+                control_task_history.append(
+                    {
+                        "id": task_id,
+                        "taskName": description,
+                        "taskType": log_type,
+                        "description": description,
+                        "status": "finished",
+                        "involvedAgents": [
+                            {
+                                "id": agent_id,
+                                "name": str(agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)),
+                            }
+                        ],
+                        "createdAt": task_control_registry[task_id].get("created_at") or timestamp,
+                        "updatedAt": timestamp,
+                    }
                 )
+                if len(control_task_history) > max_control_task_history:
+                    control_task_history.pop(0)
+            cache_entry = _ensure_agent_cache_entry(agent_id)
+            if status == "processing":
+                cache_entry["current_task"] = description
+            _sync_agent_work_status_from_tasks(
+                agent_id,
+                timestamp=timestamp,
+                current_task=cache_entry.get("current_task") or description,
+            )
+            if _agent_has_processing_tasks(agent_id):
+                cache_entry["work_status"] = "working"
+            else:
+                cache_entry["work_status"] = "idle"
+                cache_entry["current_task"] = ""
+            cache_entry["last_update"] = timestamp
 
-            # Add log entry
-            cache_entry["logs"].append(log_entry)
-            # Keep only last 10 logs
-            if len(cache_entry["logs"]) > 10:
-                cache_entry["logs"] = cache_entry["logs"][-10:]
+        elif log_type in {"PublisherTrackAdd", "PublisherTrackDel"} and agent_id:
+            track_list = content.get("track_list") or content.get("tracks") or []
+            if not isinstance(track_list, list):
+                track_list = []
+            cache_entry = _ensure_agent_cache_entry(agent_id)
+            cache_entry["track_info"] = _update_agent_track_info(
+                agent_id,
+                task_id=task_id,
+                track_list=track_list,
+                remove=log_type == "PublisherTrackDel",
+                timestamp=timestamp,
+            )
 
-        # Create update message
         update_message = {
             "type": "AGENT_STATUS_UPDATE",
             "payload": {
                 "agent_id": agent_id,
-                "agent_name": agent_name
-                or (agent_status_cache.get(agent_id, {}).get("agent_name", "")),
-                "work_status": work_status,
-                "current_task": task_desc,
                 "log_type": log_type,
                 "element_id": element_id,
                 "timestamp": timestamp,
@@ -5024,11 +4611,31 @@ async def receive_element_log(request: Dict[str, Any]):
         }
 
         print(
-            f"[Element Log] {element_id} | {log_type} | Agent: {agent_id[:30] if agent_id else 'N/A'}... | Status: {work_status}"
+            f"[Element Log] {element_id} | {log_type} | Agent: {agent_id[:30] if agent_id else 'N/A'}..."
         )
 
-        # Broadcast to all connected WebSocket clients
         await manager.broadcast(update_message)
+        if log_type in {
+            "PublishAgent",
+            "DeleteAgent",
+            "TaskExecution",
+            "TaskExecutionTermination",
+            "PublisherTrackAdd",
+            "PublisherTrackDel",
+        }:
+            tasks = build_control_tasks_snapshot()
+            dashboard = build_dashboard_snapshot()
+            await manager.broadcast({"type": "DASHBOARD_SNAPSHOT", "payload": dashboard})
+            await manager.broadcast(
+                {
+                    "type": "TASKS_UPDATED",
+                    "payload": {
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "tasks": tasks,
+                        "dashboard": dashboard,
+                    },
+                }
+            )
 
         return {
             "status": "success",
@@ -5111,7 +4718,6 @@ async def websocket_endpoint(websocket: WebSocket):
 
                     if result.get("success"):
                         agent_status_cache.clear()
-                        task_agent_mapping.clear()
                         pipeline_log_buffer.clear()
                         task_control_registry.clear()
                         control_task_history.clear()
@@ -5221,6 +4827,8 @@ try:
     @app.get("/{path:path}")
     async def serve_react_routes(path: str):
         """Serve React frontend for all routes with no-cache headers"""
+        if path.startswith(("api/", "acn/")):
+            raise HTTPException(status_code=404, detail="Not Found")
         response = FileResponse(
             str(FRONTEND_INDEX_FILE),
             headers={
@@ -5230,144 +4838,6 @@ try:
             },
         )
         return response
-
-    # Video Stream API Endpoints
-    @app.get("/api/video/streams")
-    async def get_video_streams():
-        """Get all active video streams"""
-        return {
-            "streams": video_stream_manager.get_all_streams(),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    @app.get("/api/video/streams/{agent_id}")
-    async def get_agent_video_streams(agent_id: str):
-        """Get video streams for a specific agent"""
-        streams = video_stream_manager.get_agent_streams(agent_id)
-        return {
-            "agent_id": agent_id,
-            "streams": [s.to_dict() for s in streams],
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    @app.post("/api/video/streams/{agent_id}/register")
-    async def register_video_stream(agent_id: str, request: Dict[str, Any]):
-        """Register a new video stream from an agent"""
-        agent_name = request.get("agent_name", agent_id)
-        stream_type = request.get("stream_type", "camera")
-        resolution = request.get("resolution", "1920x1080")
-        fps = request.get("fps", 30)
-
-        stream = video_stream_manager.register_stream(
-            agent_id=agent_id,
-            agent_name=agent_name,
-            stream_type=stream_type,
-            resolution=resolution,
-            fps=fps,
-        )
-
-        # Broadcast to all clients
-        await video_stream_manager.broadcast_stream_list()
-
-        return {
-            "status": "success",
-            "stream": stream.to_dict(),
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    @app.post("/api/video/webrtc/offer")
-    async def handle_webrtc_offer(request: Dict[str, Any]):
-        """Handle WebRTC offer from agent (agent wants to stream)"""
-        stream_id = request.get("stream_id")
-        offer = request.get("offer")
-
-        if not stream_id or not offer:
-            return {"status": "error", "message": "Missing stream_id or offer"}
-
-        video_stream_manager.set_webrtc_offer(stream_id, offer)
-        stream = video_stream_manager.get_stream(stream_id)
-
-        if stream:
-            # In a real implementation, you would:
-            # 1. Create a WebRTC peer connection on the server
-            # 2. Set the remote description (offer)
-            # 3. Create an answer
-            # 4. Return the answer to the agent
-
-            # For now, we'll simulate this
-            await video_stream_manager.broadcast_stream_update(stream_id)
-
-            return {
-                "status": "success",
-                "stream_id": stream_id,
-                "message": "Offer received, waiting for viewer to connect",
-                "timestamp": datetime.utcnow().isoformat(),
-            }
-
-        return {"status": "error", "message": "Stream not found"}
-
-    @app.post("/api/video/webrtc/answer")
-    async def handle_webrtc_answer(request: Dict[str, Any]):
-        """Handle WebRTC answer from viewer (browser wants to watch)"""
-        stream_id = request.get("stream_id")
-        answer = request.get("answer")
-
-        if not stream_id or not answer:
-            return {"status": "error", "message": "Missing stream_id or answer"}
-
-        video_stream_manager.set_webrtc_answer(stream_id, answer)
-        video_stream_manager.update_stream_status(stream_id, StreamStatus.STREAMING)
-
-        await video_stream_manager.broadcast_stream_update(stream_id)
-
-        return {
-            "status": "success",
-            "stream_id": stream_id,
-            "message": "Viewer connected",
-            "timestamp": datetime.utcnow().isoformat(),
-        }
-
-    @app.post("/api/video/webrtc/ice")
-    async def handle_ice_candidate(request: Dict[str, Any]):
-        """Handle ICE candidate exchange"""
-        stream_id = request.get("stream_id")
-        candidate = request.get("candidate")
-        is_agent = request.get(
-            "is_agent", True
-        )  # True if from agent, False if from viewer
-
-        if stream_id and candidate:
-            video_stream_manager.add_ice_candidate(
-                stream_id, {"candidate": candidate, "is_agent": is_agent}
-            )
-
-            # Broadcast ICE candidate to the other party
-            await manager.broadcast(
-                {
-                    "type": "WEBRTC_ICE_CANDIDATE",
-                    "payload": {
-                        "stream_id": stream_id,
-                        "candidate": candidate,
-                        "from_agent": is_agent,
-                    },
-                }
-            )
-
-            return {"status": "success"}
-
-        return {"status": "error", "message": "Missing stream_id or candidate"}
-
-    @app.delete("/api/video/streams/{stream_id}")
-    async def unregister_video_stream(stream_id: str):
-        """Unregister a video stream"""
-        video_stream_manager.unregister_stream(stream_id)
-        await video_stream_manager.broadcast_stream_list()
-
-        return {
-            "status": "success",
-            "stream_id": stream_id,
-            "timestamp": datetime.utcnow().isoformat(),
-        }
 
 except Exception as e:
     print(f"[Warning] React build not found or error: {e}. API only mode.")

@@ -9,16 +9,6 @@ interface MOQTrackPlayerProps {
   track: VideoTrackModel;
 }
 
-interface StreamInfoPayload {
-  status?: string;
-  has_frame?: boolean;
-  width?: number | null;
-  height?: number | null;
-  metadata?: Record<string, unknown> | null;
-  fragment_count?: number;
-  jpeg_sequence?: number;
-}
-
 interface PlayerMetadata {
   codec?: string;
   fps?: number;
@@ -73,103 +63,6 @@ const getCandidateHosts = (host: string) => {
     seen[candidate] = true;
     return true;
   });
-};
-
-const MjpegTrackPlayer = ({
-  language,
-  player,
-  track
-}: Omit<MOQTrackPlayerProps, 'bootstrap'>) => {
-  const copy = shellCopy[language].agentsVideo;
-  const [streamInfo, setStreamInfo] = useState<StreamInfoPayload | null>(null);
-  const [streamError, setStreamError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  const [streamNonce, setStreamNonce] = useState(() => Date.now());
-  const [snapshotNonce, setSnapshotNonce] = useState(() => Date.now());
-  const mjpegUrl = player.mjpegUrl ?? `/api/video/stream/${encodeURIComponent(track.trackId)}/mjpeg`;
-  const latestFrameUrl = `/api/video/stream/${encodeURIComponent(track.trackId)}/latest?snapshot=${snapshotNonce}`;
-  const liveStreamUrl = `${mjpegUrl}${mjpegUrl.includes('?') ? '&' : '?'}stream=${streamNonce}`;
-
-  useEffect(() => {
-    setLoaded(false);
-    setStreamError(null);
-    setStreamNonce(Date.now());
-    setSnapshotNonce(Date.now());
-  }, [track.trackId]);
-
-  useEffect(() => {
-    let mounted = true;
-
-    const fetchInfo = async () => {
-      try {
-        const response = await fetch(`/api/video/stream/${encodeURIComponent(track.trackId)}/info`);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`);
-        }
-        const payload = (await response.json()) as StreamInfoPayload;
-        if (!mounted) {
-          return;
-        }
-        setStreamInfo(payload);
-        setStreamError(null);
-      } catch (error) {
-        if (!mounted) {
-          return;
-        }
-        setStreamError(error instanceof Error ? error.message : copy.playerFailed);
-      }
-    };
-
-    void fetchInfo();
-    const interval = window.setInterval(() => {
-      void fetchInfo();
-    }, 1000);
-
-    return () => {
-      mounted = false;
-      window.clearInterval(interval);
-    };
-  }, [copy.playerFailed, track.trackId]);
-
-  useEffect(() => {
-    if (streamInfo?.has_frame && !loaded) {
-      setSnapshotNonce(Date.now());
-      setStreamNonce(Date.now());
-    }
-  }, [loaded, streamInfo?.has_frame]);
-
-  return (
-    <TrackPlayerLayout
-      track={track}
-      error={streamError}
-      statusLabel={loaded ? copy.subscribed : copy.connecting}
-      statusDetail={streamError ?? (loaded ? copy.ready : copy.waiting)}
-    >
-      <div className="moq-video-surface">
-        {!loaded && streamInfo?.has_frame ? (
-          <img
-            src={latestFrameUrl}
-            alt={`${track.trackName} snapshot`}
-            className="absolute inset-0 h-full w-full object-contain"
-          />
-        ) : null}
-        <img
-          key={liveStreamUrl}
-          src={liveStreamUrl}
-          alt={track.trackName}
-          className={`h-full w-full object-contain transition-opacity duration-300 ${loaded ? 'opacity-100' : 'opacity-0'}`}
-          onLoad={() => {
-            setLoaded(true);
-            setStreamError(null);
-          }}
-          onError={() => {
-            setLoaded(false);
-            setStreamError(copy.playerFailed);
-          }}
-        />
-      </div>
-    </TrackPlayerLayout>
-  );
 };
 
 const TrackPlayerLayout = ({
@@ -229,13 +122,7 @@ export const MOQTrackPlayer = ({
   const [connectionDetail, setConnectionDetail] = useState<string>(copy.waiting);
   const [connectionError, setConnectionError] = useState<string | null>(null);
 
-  const useMjpegFallback = !player.certHash || !player.path;
-
   useEffect(() => {
-    if (useMjpegFallback) {
-      return;
-    }
-
     let cancelled = false;
     const generation = playbackGenerationRef.current + 1;
     playbackGenerationRef.current = generation;
@@ -660,13 +547,8 @@ export const MOQTrackPlayer = ({
     player.path,
     player.port,
     track.metadata,
-    track.trackId,
-    useMjpegFallback
+    track.trackId
   ]);
-
-  if (useMjpegFallback) {
-    return <MjpegTrackPlayer language={language} player={player} track={track} />;
-  }
 
   return (
     <TrackPlayerLayout

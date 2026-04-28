@@ -24,13 +24,21 @@ const formatTime = (value: string) => {
     return value;
   }
 
-  return parsed.toLocaleString([], {
-    month: 'short',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  });
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return [
+    parsed.getUTCFullYear(),
+    '-',
+    pad(parsed.getUTCMonth() + 1),
+    '-',
+    pad(parsed.getUTCDate()),
+    ' ',
+    pad(parsed.getUTCHours()),
+    ':',
+    pad(parsed.getUTCMinutes()),
+    ':',
+    pad(parsed.getUTCSeconds()),
+    ' UTC'
+  ].join('');
 };
 
 export const ControlTaskSection = ({
@@ -87,7 +95,7 @@ export const ControlTaskSection = ({
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <div className="flex flex-wrap items-center gap-2">
-                      <h4 className="theme-title text-base font-semibold">{task.taskName}</h4>
+                      <h4 className="theme-title break-words text-base font-semibold">{task.id}</h4>
                       <span className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] ${statusStyles[task.status]}`}>
                         {isZh ? (task.status === 'processing' ? '处理中' : '已完成') : task.status}
                       </span>
@@ -118,9 +126,9 @@ export const ControlTaskSection = ({
                   ) : null}
                 </div>
 
-                <div className="mt-4 grid gap-3 md:grid-cols-[1.4fr_0.8fr_0.8fr]">
+                <div className="mt-4 space-y-3">
                   <div className="theme-card-muted p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '关联智能体' : 'Involved Agents'}</p>
+                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '协作智能体' : 'Cooperation Agents'}</p>
                     <div className="mt-3 flex flex-wrap gap-2">
                       {task.involvedAgents.map((agent) => (
                         <span key={`${task.id}-${agent.id}`} className="theme-chip px-3 py-1 text-xs font-medium">
@@ -129,13 +137,15 @@ export const ControlTaskSection = ({
                       ))}
                     </div>
                   </div>
-                  <div className="theme-card-muted p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '创建时间' : 'Created'}</p>
-                    <p className="theme-title mt-3 text-sm font-medium">{formatTime(task.createdAt)}</p>
-                  </div>
-                  <div className="theme-card-muted p-4">
-                    <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '更新时间' : 'Updated'}</p>
-                    <p className="theme-title mt-3 text-sm font-medium">{formatTime(task.updatedAt)}</p>
+                  <div className="grid gap-3 md:grid-cols-2">
+                    <div className="theme-card-muted p-4">
+                      <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '创建时间' : 'Created Time'}</p>
+                      <p className="theme-title mt-3 text-sm font-medium">{formatTime(task.createdAt)}</p>
+                    </div>
+                    <div className="theme-card-muted p-4">
+                      <p className="theme-muted text-xs uppercase tracking-[0.18em]">{isZh ? '更新时间' : 'Updated Time'}</p>
+                      <p className="theme-title mt-3 text-sm font-medium">{formatTime(task.updatedAt)}</p>
+                    </div>
                   </div>
                 </div>
               </article>
