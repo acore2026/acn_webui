@@ -10,7 +10,6 @@ ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN age
 
 - 主 WebUI: `https://localhost:9005`
 - 主 WebSocket: `wss://localhost:9005/ws`
-- 可选独立视频服务: `http://localhost:9006`
 - AgentGW `ARF`: `9001`
 - AgentGW `ACF`: `9002`
 - AgentGW `Relay`: `9003`
@@ -21,12 +20,12 @@ ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN age
 
 ### 主后端 (`9005`)
 
-集成后端入口在 [backend/app/main.py](/root/lpx/webui/backend/app/main.py:1)。
+集成后端入口在 [backend/app/main.py](/home/acn/cxr/acn_webui/backend/app/main.py:1)。
 
 它负责：
 - 提供构建后的 React 前端
 - 暴露 dashboard API
-- 从外部 SQLite 数据库读取 agents 和 tasks
+- 使用 WebUI 本地缓存数据库维护 agents、tasks 和已接收消息
 - 汇总后端日志与网络组件日志
 - 在 WebUI clear 之后隐藏旧的组件日志显示，但不修改源日志文件
 - 管理证书上传/删除元数据，并把证书请求转发给 IDM
@@ -35,7 +34,7 @@ ACN WebUI 是一个基于 FastAPI + React 的监控看板，用于展示 ACN age
 - 通过 WebSocket 推送 dashboard 快照和任务更新
 
 相关后端模块：
-- [backend/app/moq_video.py](/root/lpx/webui/backend/app/moq_video.py:1)：MOQ 订阅器、发现轨道注册表、WebTransport 桥接和 MSE 播放数据转发
+- [backend/app/moq_video.py](/home/acn/cxr/acn_webui/backend/app/moq_video.py:1)：MOQ 订阅器、轨道注册表、WebTransport 桥接和 MSE 播放数据转发
 
 ## 项目结构
 
@@ -63,7 +62,7 @@ webui/
 ### 推荐方式：启动集成 WebUI
 
 ```bash
-cd /root/lpx/webui
+cd /home/acn/cxr/acn_webui
 ./start_all.sh start
 ```
 
@@ -81,22 +80,32 @@ cd /root/lpx/webui
 - 启动 `9005` 上的 FastAPI
 - 由后端直接提供已构建的前端页面
 
+公网访问时，`start_all.sh` 默认会导出以下 WebTransport 相关 host，用于把公网 IP 写入临时证书 SAN：
+
+```bash
+WEBUI_PUBLIC_HOST=101.245.78.174
+MOQ_WEBTRANSPORT_HOST=101.245.78.174
+MOQ_WEBTRANSPORT_PUBLIC_HOST=101.245.78.174
+```
+
+如果部署 IP 变化，可以在执行脚本时覆盖这些变量，例如 `WEBUI_PUBLIC_HOST=<新IP> MOQ_WEBTRANSPORT_HOST=<新IP> MOQ_WEBTRANSPORT_PUBLIC_HOST=<新IP> ./start_all.sh restart`。
+
 ### 只启动后端
 
 ```bash
-cd /root/lpx/webui/backend
-/root/lpx/webui/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9005
+cd /home/acn/cxr/acn_webui/backend
+/home/acn/cxr/acn_webui/.venv/bin/python3 -m uvicorn app.main:app --host 0.0.0.0 --port 9005
 ```
 
 ### 前端开发模式
 
 ```bash
-cd /root/lpx/webui/frontend
+cd /home/acn/cxr/acn_webui/frontend
 npm install
 npm start
 ```
 
-这会在 `http://localhost:9006` 启动 React 开发服务器。
+这会在 `http://localhost:9006` 启动 React 开发服务器，仅用于前端开发调试；产品路径仍是 `https://localhost:9005` 的集成 WebUI。
 
 ## 主 API（`9005`）
 
@@ -196,14 +205,14 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
 - `ABORT_ALL`
 - `PONG`
 
-更详细的接口说明见 [API.md](/root/lpx/webui/API.md:1)。
+更详细的接口说明见 [API.md](/home/acn/cxr/acn_webui/API.md:1)。
 
 ## 数据来源
 
-这个 dashboard 不是自包含系统。当前后端会读取外部服务和文件：
+这个 dashboard 不是自包含系统。当前后端会读取外部服务状态和日志文件，但 agent/task 状态只来自 WebUI 本地缓存数据库。
 
-- agent/task 数据库：
-  - `/home/acn/zqm/acn_gw/agent_gw/agent_gw.db`
+- WebUI 本地状态数据库：
+  - `logs/webui_local_state.db`
 - ACN Agent 日志：
   - `/home/acn/cxr/acn_agent/.acn_agent.log`
 - AgentGW 日志：
@@ -212,14 +221,10 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
   - `/home/acn/cx/idm/logs`
 - ARF 清理接口：
   - `http://localhost:9001/clear`
-- WebUI 本地状态数据库：
-  - `logs/webui_local_state.db`
 - WebUI 证书数据库：
   - `logs/certificates.db`
 - WebUI 证书文件缓存：
   - `logs/cert_store`
-- WebUI 运行时设置：
-  - `logs/direct_demo_settings.json`
 
 重要日志行为：
 - WebUI clear 不会截断或删除源组件日志文件
@@ -231,17 +236,21 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
 
 ### Agents
 
-- `agents` 表是 agent 存在性的真实来源
-- 后端会基于数据库内容加上瞬时运行态缓存重建 dashboard agent 数据
+- `agents` 表是 WebUI 当前 agent 存在性的真实来源
+- `agents` 表由 `/acn/v3/element-logs` 中的 `PublishAgent`、`DeleteAgent`、`TaskExecution`、`TaskExecutionTermination`、`PublisherTrackAdd`、`PublisherTrackDel` 维护
+- 后端会基于本地数据库内容加上瞬时运行态缓存重建 dashboard agent 数据
 - 前端主要跟随 `GET /api/dashboard/overview` 和 WebSocket 的 `DASHBOARD_SNAPSHOT`
 
 ### Tasks
 
-- 活跃任务来自数据库里的 `tasks` 表
-- 后端会把数据库任务和内存中的任务元数据、最近完成任务历史组合起来
+- 任务来自 WebUI 本地数据库里的 `tasks` 表
+- `TaskExecution` 会 upsert `(task_id, agent_id)` 对应任务并置为 `processing`
+- `TaskExecutionTermination` 会把对应任务置为 `finished`，不会删除任务记录
+- `DeleteAgent` 会删除该 agent 以及本地 `tasks` 表中该 agent 的任务记录
+- 后端会把本地数据库任务和内存中的任务元数据、最近完成任务历史组合起来
 - 前端会轮询 `GET /api/control/tasks`，同时也会响应 WebSocket 的 `TASKS_UPDATED`
 
-这意味着当前没有直接监听 SQLite 变更，而是依靠后端重复读取数据库，再配合 WebSocket 更新。
+WebUI 不读取外部 AgentGW/ARF sqlite 数据库，也没有直接监听 sqlite 变更；状态变化来自 HTTP 消息处理、WebUI 本地控制接口和 WebSocket `REFRESH` 控制消息。
 
 ## 视频 / MOQ 说明
 
@@ -260,6 +269,7 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
 - `MOQ_RELAY_HOST`：默认 `localhost`
 - `MOQ_RELAY_PORT`：默认 `9003`
 - `MOQ_WEBTRANSPORT_PORT`：默认跟随 `BACKEND_PORT`，当前集成 WebUI 默认为 `9005`
+- `WEBUI_PUBLIC_HOST` / `MOQ_WEBTRANSPORT_HOST` / `MOQ_WEBTRANSPORT_PUBLIC_HOST`：默认 `101.245.78.174`，用于生成包含公网 IP 的 WebTransport 临时证书
 
 ### 浏览器播放实现
 
@@ -267,6 +277,7 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
 
 - 后端 WebTransport bridge 监听在当前 WebUI HTTPS 服务上，浏览器连接路径为 `/wt/preview`
 - WebTransport 要求页面运行在 HTTPS 或 localhost 环境
+- 公网播放需要浏览器直连服务器的 UDP `9005`；只放通 TCP `9005` 时页面能打开，但 WebTransport 会在 opening handshake 阶段失败
 - 后端向浏览器发送内部帧：metadata JSON、MP4 init segment、fMP4 media fragments、end
 - 前端根据 metadata 中的 `mime_type` / `mse_codec` 创建 `MediaSource` 和 `SourceBuffer`
 - 前端会调用 `MediaSource.isTypeSupported(mime_type)`，浏览器不支持该 MIME / codec 时无法播放
@@ -306,21 +317,21 @@ WebUI 对 stop/restart 操作会弹出二次确认。只有组件离线时才允
 
 ## 测试
 
-当前测试说明见 [test/README.md](/root/lpx/webui/test/README.md:1)。
+当前测试说明见 [test/README.md](/home/acn/cxr/acn_webui/test/README.md:1)。
 
 最常用的当前路径：
 
 ### Agent / Task 消息流
 
 ```bash
-cd /root/lpx/webui
+cd /home/acn/cxr/acn_webui
 python3 test/agent_task_message_flow.py --base-url https://127.0.0.1:9005 --interactive
 ```
 
 ### Dashboard 消息 / 演示流程
 
 ```bash
-cd /root/lpx/webui
+cd /home/acn/cxr/acn_webui
 python3 test/test_messages.py --topology-demo --host 127.0.0.1 --port 9005
 python3 test/test_messages.py --full-demo --host 127.0.0.1 --port 9005
 ```
@@ -368,10 +379,10 @@ Network Element Status 卡片只表示本地端口是否可达，不代表完整
 
 ### Clear 之后 agent 没完全消失
 
-后端会把数据库里的 agent 身份信息和运行态缓存合并。如果外部 AgentGW/ARF 侧仍然保留这些 agent，它们可能在刷新后再次出现。
+`/api/control/clear` 会清空 WebUI 本地 `agents`、`tasks` 和相关内存缓存。Clear 之后如果又收到新的 `PublishAgent` 或任务消息，agent 会按新消息重新出现在页面上。
 
 ## 备注
 
 - 当前 dashboard 支持英文和中文
 - 默认产品路径是集成式 `9005` WebUI
-- `9006` 服务是可选的，主要用于独立视频测试
+- `9006` 仅是 React 开发服务器端口，不是当前产品视频链路

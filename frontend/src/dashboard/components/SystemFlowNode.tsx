@@ -88,6 +88,13 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
         style={{ top: '50%' }}
       />
       <Handle
+        id="left-bottom-in"
+        type="target"
+        position={Position.Left}
+        className={hiddenHandleClass}
+        style={{ top: '72%' }}
+      />
+      <Handle
         id="right-in"
         type="target"
         position={Position.Right}
@@ -114,6 +121,13 @@ export const SystemFlowNode = ({ data, selected }: NodeProps<SystemFlowNodeModel
         position={Position.Bottom}
         className={hiddenHandleClass}
         style={{ left: '62%' }}
+      />
+      <Handle
+        id="bottom-mid-in"
+        type="target"
+        position={Position.Bottom}
+        className={hiddenHandleClass}
+        style={{ left: '50%' }}
       />
       <Handle
         id="left-out"

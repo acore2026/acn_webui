@@ -11,6 +11,7 @@ type FlowMessageEdgeData = {
   bundleOffset?: number;
   bubbleAnchor?: 'source' | 'target' | 'mid';
   bubbleTail?: 'left' | 'right' | 'top' | 'bottom';
+  bubbleLaneOffset?: number;
 };
 
 const resolveBaseBubbleOffset = (tail?: FlowMessageEdgeData['bubbleTail']) => {
@@ -69,7 +70,6 @@ export const FlowMessageEdge = ({
   targetY,
   sourcePosition,
   targetPosition,
-  markerEnd,
   style,
   data,
 }: EdgeProps) => {
@@ -95,6 +95,19 @@ export const FlowMessageEdge = ({
   const edgePath = `M ${sourceX},${sourceY} C ${sourceControl.x},${sourceControl.y} ${targetControl.x},${targetControl.y} ${targetX},${targetY}`;
   const labelX = resolveBezierPoint(sourceX, sourceControl.x, targetControl.x, targetX, 0.5);
   const labelY = resolveBezierPoint(sourceY, sourceControl.y, targetControl.y, targetY, 0.5);
+  const arrowReferenceX = targetControl.x;
+  const arrowReferenceY = targetControl.y;
+
+  const edgeColor = typeof style?.stroke === 'string' ? style.stroke : '#06b6d4';
+  const arrowAngle =
+    Math.atan2(targetY - arrowReferenceY, targetX - arrowReferenceX) * (180 / Math.PI);
+  const laneOffset = edgeData.bubbleLaneOffset ?? 0;
+  const edgeDx = targetX - sourceX;
+  const edgeDy = targetY - sourceY;
+  const laneAxis =
+    Math.abs(edgeDx) >= Math.abs(edgeDy)
+      ? { x: 0, y: laneOffset }
+      : { x: laneOffset, y: 0 };
 
   const anchorX =
     edgeData.bubbleAnchor === 'source'
@@ -112,13 +125,19 @@ export const FlowMessageEdge = ({
 
   return (
     <>
-      <BaseEdge id={id} path={edgePath} markerEnd={markerEnd} style={style} />
+      <BaseEdge id={id} path={edgePath} style={style} />
+      <path
+        d="M 0 0 L -13 -6 L -9 0 L -13 6 Z"
+        transform={`translate(${targetX}, ${targetY}) rotate(${arrowAngle})`}
+        fill={edgeColor}
+        className="theme-topology-edge-arrow"
+      />
       {edgeData.active ? (
         <path
           d={edgePath}
           className="theme-topology-edge-direction"
           style={{
-            stroke: typeof style?.stroke === 'string' ? style.stroke : '#06b6d4'
+            stroke: edgeColor
           }}
         />
       ) : null}
@@ -132,7 +151,7 @@ export const FlowMessageEdge = ({
                 : '',
             ].join(' ')}
             style={{
-              transform: `translate(-50%, -50%) translate(${anchorX + baseOffset.x + (edgeData.bubbleOffsetX ?? 0)}px, ${anchorY + baseOffset.y + (edgeData.bubbleOffsetY ?? 0)}px)`,
+              transform: `translate(-50%, -50%) translate(${anchorX + baseOffset.x + laneAxis.x + (edgeData.bubbleOffsetX ?? 0)}px, ${anchorY + baseOffset.y + laneAxis.y + (edgeData.bubbleOffsetY ?? 0)}px)`,
             }}
           >
             {edgeData.messageLabel ? (

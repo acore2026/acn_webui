@@ -8,7 +8,12 @@ Base URL:
 https://<host>:9005
 ```
 
-当前 WebUI 使用本地缓存数据库 `logs/webui_local_state.db` 维护 agent/task 状态，不再读取外部 AgentGW 数据库。
+当前 WebUI 只使用本地 sqlite 数据库维护自身状态：
+
+- `logs/webui_local_state.db`：维护 `agents`、`tasks`、`ingested_logs`
+- `logs/certificates.db`：维护 WebUI 已上传证书的本地元数据
+
+当前实现不会读取外部 AgentGW/ARF sqlite 数据库。`agents` 和 `tasks` 的变化来自 `/acn/v3/element-logs`、WebUI 本地控制接口和 WebSocket `REFRESH` 控制消息。
 
 ## 1. 系统状态
 

@@ -2332,7 +2332,7 @@ def _merge_agent_sources() -> List[Dict[str, Any]]:
     merged: List[Dict[str, Any]] = []
     seen_agent_ids = set()
 
-    # The ARF/AgentGW database is the source of truth for which agents exist.
+    # The WebUI local cache database is the source of truth for which agents exist.
     # Runtime cache only enriches those agents with transient state.
     for agent in get_agents_from_db():
         agent_id = str(agent.get("agent_id", "")).strip()
