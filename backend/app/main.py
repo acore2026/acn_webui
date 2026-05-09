@@ -50,6 +50,8 @@ LOCAL_STATUS_HOST = "127.0.0.1"
 AGENT_GW_LOG_DIR = Path("/home/acn/zqm/acn_gw/agent_gw/logs")
 IDM_LOG_DIR = Path("/home/acn/cx/idm/logs")
 ACN_AGENT_LOG_FILE = Path("/home/acn/cxr/acn_agent/.acn_agent.log")
+DEFAULT_TASK_RETRY_DEDUP_WINDOW_SECONDS = 40
+TASK_RETRY_DEDUP_WINDOW_SECONDS_ENV = "TASK_RETRY_DEDUP_WINDOW_SECONDS"
 ELEMENT_PORTS = [
     {
         "id": "acn-agent",
@@ -118,6 +120,19 @@ NETWORK_ELEMENT_CONTROL_SCRIPTS = {
         "description": "Controls the IDM identity verification service.",
     },
 }
+
+
+def _get_env_int(name: str, default: int) -> int:
+    raw_value = os.environ.get(name)
+    if raw_value is None:
+        return default
+
+    try:
+        value = int(str(raw_value).strip())
+    except Exception:
+        return default
+
+    return value if value > 0 else default
 NETWORK_ELEMENT_CONTROL_ACTIONS = {"start", "stop", "restart"}
 
 FLOW_NODE_LAYOUTS = {
@@ -764,6 +779,31 @@ def _remove_local_task(task_id: str) -> None:
         conn.close()
 
 
+def _remove_local_tasks(task_ids: List[str]) -> None:
+    normalized_task_ids = []
+    seen_task_ids = set()
+    for task_id in task_ids:
+        normalized_task_id = str(task_id or "").strip()
+        if normalized_task_id and normalized_task_id not in seen_task_ids:
+            seen_task_ids.add(normalized_task_id)
+            normalized_task_ids.append(normalized_task_id)
+
+    if not normalized_task_ids:
+        return
+
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        placeholders = ",".join("?" for _ in normalized_task_ids)
+        cursor.execute(
+            f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
+            normalized_task_ids,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def _delete_local_agent(agent_id: str) -> None:
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id:
@@ -807,6 +847,165 @@ def _remove_agent_control_task_snapshots(agent_id: str, timestamp: Optional[str]
         if normalized_agent_id
         not in {str(agent.get("id") or "") for agent in task.get("involvedAgents", [])}
     ]
+
+
+def _remove_task_registry_entries(task_ids: List[str]) -> None:
+    normalized_task_ids = {
+        str(task_id or "").strip()
+        for task_id in task_ids
+        if str(task_id or "").strip()
+    }
+    if not normalized_task_ids:
+        return
+
+    for task_id in normalized_task_ids:
+        task_control_registry.pop(task_id, None)
+
+    control_task_history[:] = [
+        task
+        for task in control_task_history
+        if str(task.get("id") or "") not in normalized_task_ids
+    ]
+
+
+def _normalize_task_signature_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).strip().casefold()
+
+
+def _task_exists(task_id: str) -> bool:
+    normalized_task_id = str(task_id or "").strip()
+    if not normalized_task_id:
+        return False
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1",
+            (normalized_task_id,),
+        )
+        return cursor.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _prune_recent_retry_tasks(
+    agent_id: str,
+    task_description: str,
+    task_type: str,
+    timestamp: Optional[str] = None,
+    window_seconds: int = DEFAULT_TASK_RETRY_DEDUP_WINDOW_SECONDS,
+) -> List[str]:
+    normalized_agent_id = str(agent_id or "").strip()
+    normalized_task_type = str(task_type or "").strip()
+    normalized_description = _normalize_task_signature_text(task_description)
+    if (
+        not normalized_agent_id
+        or not normalized_task_type
+        or not normalized_description
+    ):
+        return []
+
+    current_time = _parse_timestamp(timestamp) or datetime.utcnow()
+    conn = _connect_local_cache_db()
+    task_ids_to_delete: List[str] = []
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT task_id, task_description, updated_at, created_at
+            FROM tasks
+            WHERE agent_id = ? AND status = 'processing' AND task_type = ?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (normalized_agent_id, normalized_task_type),
+        )
+        for row in cursor.fetchall():
+            if _normalize_task_signature_text(row["task_description"]) != normalized_description:
+                continue
+
+            row_time = _parse_timestamp(row["updated_at"]) or _parse_timestamp(row["created_at"])
+            if row_time is None:
+                continue
+
+            delta_seconds = (current_time - row_time).total_seconds()
+            if delta_seconds < 0 or delta_seconds > window_seconds:
+                continue
+
+            task_id = str(row["task_id"] or "").strip()
+            if task_id:
+                task_ids_to_delete.append(task_id)
+
+        if task_ids_to_delete:
+            placeholders = ",".join("?" for _ in task_ids_to_delete)
+            cursor.execute(
+                f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
+                task_ids_to_delete,
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    if task_ids_to_delete:
+        _remove_task_registry_entries(task_ids_to_delete)
+
+    return task_ids_to_delete
+
+
+def _cleanup_recent_retry_task_clusters(
+    window_seconds: int = DEFAULT_TASK_RETRY_DEDUP_WINDOW_SECONDS,
+) -> int:
+    conn = _connect_local_cache_db()
+    task_ids_to_delete: List[str] = []
+    previous_row_time_by_signature: Dict[tuple[str, str, str], datetime] = {}
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT task_id, agent_id, task_description, task_type, updated_at, created_at
+            FROM tasks
+            WHERE status = 'processing'
+            ORDER BY updated_at DESC, id DESC
+            """
+        )
+        for row in cursor.fetchall():
+            signature = (
+                str(row["agent_id"] or "").strip(),
+                str(row["task_type"] or "").strip(),
+                _normalize_task_signature_text(row["task_description"]),
+            )
+            if not signature[0] or not signature[1] or not signature[2]:
+                continue
+
+            row_time = _parse_timestamp(row["updated_at"]) or _parse_timestamp(row["created_at"])
+            if row_time is None:
+                continue
+
+            previous_row_time = previous_row_time_by_signature.get(signature)
+            if previous_row_time is None:
+                previous_row_time_by_signature[signature] = row_time
+                continue
+
+            delta_seconds = (previous_row_time - row_time).total_seconds()
+            if 0 <= delta_seconds <= window_seconds:
+                task_id = str(row["task_id"] or "").strip()
+                if task_id:
+                    task_ids_to_delete.append(task_id)
+            previous_row_time_by_signature[signature] = row_time
+
+        if task_ids_to_delete:
+            placeholders = ",".join("?" for _ in task_ids_to_delete)
+            cursor.execute(
+                f"DELETE FROM tasks WHERE task_id IN ({placeholders})",
+                task_ids_to_delete,
+            )
+            conn.commit()
+    finally:
+        conn.close()
+
+    if task_ids_to_delete:
+        _remove_task_registry_entries(task_ids_to_delete)
+
+    return len(task_ids_to_delete)
 
 
 def _agent_has_processing_tasks(agent_id: str) -> bool:
@@ -3391,9 +3590,19 @@ async def lifespan(app: FastAPI):
     print("=" * 60)
     print(f"API: {webui_scheme}://0.0.0.0:9005")
     print(f"WebSocket: {websocket_scheme}://0.0.0.0:9005/ws")
+    print(
+        f"[Task Dedup] Window: {task_retry_dedup_window_seconds}s "
+        f"({TASK_RETRY_DEDUP_WINDOW_SECONDS_ENV})"
+    )
     print("=" * 60)
     ensure_local_cache_db()
     _prime_local_cache_from_runtime_state()
+    removed_retry_tasks = _cleanup_recent_retry_task_clusters()
+    if removed_retry_tasks:
+        add_log_entry(
+            f"[Task Dedup] Removed {removed_retry_tasks} repeated processing task(s) during startup.",
+            "info",
+        )
 
     # Start background task for agent updates
     task = asyncio.create_task(broadcast_agent_updates())
@@ -3616,6 +3825,10 @@ network_element_log_cutoffs: Dict[str, int] = {}
 task_control_registry: Dict[str, Dict[str, Any]] = {}
 control_task_history: List[Dict[str, Any]] = []
 max_control_task_history = 50
+task_retry_dedup_window_seconds = _get_env_int(
+    TASK_RETRY_DEDUP_WINDOW_SECONDS_ENV,
+    DEFAULT_TASK_RETRY_DEDUP_WINDOW_SECONDS,
+)
 topology_test_runtime = {"running": False, "paused": False}
 
 
@@ -4568,68 +4781,90 @@ async def receive_element_log(request: Dict[str, Any]):
         elif log_type in {"TaskExecution", "TaskExecutionTermination"} and agent_id and task_id:
             status = "processing" if log_type == "TaskExecution" else "finished"
             description = task_description or ("Executing task" if status == "processing" else "Task execution finished")
-            _upsert_local_task(
-                task_id,
-                agent_id,
-                task_description=description,
-                task_name=description,
-                task_type=log_type,
-                status=status,
-                created_at=timestamp,
-                updated_at=timestamp,
-            )
-            existing_task_metadata = task_control_registry.get(task_id, {})
-            existing_agent_ids = [
-                str(existing_agent_id)
-                for existing_agent_id in existing_task_metadata.get("agent_ids", [])
-                if existing_agent_id
-            ]
-            if agent_id not in existing_agent_ids:
-                existing_agent_ids.append(agent_id)
-            existing_agent_names = dict(existing_task_metadata.get("agent_names", {}))
-            existing_agent_names[agent_id] = agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)
-            task_control_registry[task_id] = {
-                **existing_task_metadata,
-                "task_name": description,
-                "task_type": log_type,
-                "task_description": description,
-                "created_at": existing_task_metadata.get("created_at") or timestamp,
-                "updated_at": timestamp,
-                "status": status,
-                "agent_ids": existing_agent_ids,
-                "agent_names": existing_agent_names,
-            }
-            if status == "finished":
-                control_task_history.append(
-                    {
-                        "id": task_id,
-                        "taskName": description,
-                        "taskType": log_type,
-                        "description": description,
-                        "status": "finished",
-                        "involvedAgents": [
-                            {
-                                "id": agent_id,
-                                "name": str(agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)),
-                            }
-                        ],
-                        "createdAt": task_control_registry[task_id].get("created_at") or timestamp,
-                        "updatedAt": timestamp,
-                    }
-                )
-                if len(control_task_history) > max_control_task_history:
-                    control_task_history.pop(0)
-            cache_entry = _ensure_agent_cache_entry(agent_id)
+            should_persist_task = True
             if status == "processing":
+                removed_task_ids = _prune_recent_retry_tasks(
+                    agent_id,
+                    description,
+                    log_type,
+                    timestamp=timestamp,
+                )
+                if removed_task_ids:
+                    add_log_entry(
+                        f"[Task Dedup] Collapsed {len(removed_task_ids)} repeated {log_type} task(s) for {agent_id}.",
+                        "info",
+                    )
+            elif not _task_exists(task_id) and task_id not in task_control_registry:
+                should_persist_task = False
+                add_log_entry(
+                    f"[Task Dedup] Ignored stale {log_type} for {agent_id} ({task_id}).",
+                    "info",
+                )
+
+            cache_entry = _ensure_agent_cache_entry(agent_id)
+            if should_persist_task:
+                _upsert_local_task(
+                    task_id,
+                    agent_id,
+                    task_description=description,
+                    task_name=description,
+                    task_type=log_type,
+                    status=status,
+                    created_at=timestamp,
+                    updated_at=timestamp,
+                )
+                existing_task_metadata = task_control_registry.get(task_id, {})
+                existing_agent_ids = [
+                    str(existing_agent_id)
+                    for existing_agent_id in existing_task_metadata.get("agent_ids", [])
+                    if existing_agent_id
+                ]
+                if agent_id not in existing_agent_ids:
+                    existing_agent_ids.append(agent_id)
+                existing_agent_names = dict(existing_task_metadata.get("agent_names", {}))
+                existing_agent_names[agent_id] = agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)
+                task_control_registry[task_id] = {
+                    **existing_task_metadata,
+                    "task_name": description,
+                    "task_type": log_type,
+                    "task_description": description,
+                    "created_at": existing_task_metadata.get("created_at") or timestamp,
+                    "updated_at": timestamp,
+                    "status": status,
+                    "agent_ids": existing_agent_ids,
+                    "agent_names": existing_agent_names,
+                }
+                if status == "finished":
+                    control_task_history.append(
+                        {
+                            "id": task_id,
+                            "taskName": description,
+                            "taskType": log_type,
+                            "description": description,
+                            "status": "finished",
+                            "involvedAgents": [
+                                {
+                                    "id": agent_id,
+                                    "name": str(agent_status_cache.get(agent_id, {}).get("agent_name", agent_id)),
+                                }
+                            ],
+                            "createdAt": task_control_registry[task_id].get("created_at") or timestamp,
+                            "updatedAt": timestamp,
+                        }
+                    )
+                    if len(control_task_history) > max_control_task_history:
+                        control_task_history.pop(0)
+            if status == "processing" and should_persist_task:
                 cache_entry["current_task"] = description
-            _sync_agent_work_status_from_tasks(
-                agent_id,
-                timestamp=timestamp,
-                current_task=cache_entry.get("current_task") or description,
-            )
+            if should_persist_task:
+                _sync_agent_work_status_from_tasks(
+                    agent_id,
+                    timestamp=timestamp,
+                    current_task=cache_entry.get("current_task") or description,
+                )
             if _agent_has_processing_tasks(agent_id):
                 cache_entry["work_status"] = "working"
-            else:
+            elif should_persist_task:
                 cache_entry["work_status"] = "idle"
                 cache_entry["current_task"] = ""
             cache_entry["last_update"] = timestamp
