@@ -69,8 +69,9 @@ const formatTime = (value?: string) => {
 
 const renderEntries = (entries: BackendLogEntry[], language: LanguageMode) => {
   const isZh = language === 'zh';
+  const orderedEntries = [...entries].reverse();
 
-  if (entries.length === 0) {
+  if (orderedEntries.length === 0) {
     return (
       <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-[color:var(--border-soft)] px-4 text-sm text-[color:var(--text-soft)]">
         {isZh ? '当前没有可显示的日志内容。' : 'No log lines available yet.'}
@@ -80,7 +81,7 @@ const renderEntries = (entries: BackendLogEntry[], language: LanguageMode) => {
 
   return (
     <div className="min-w-0 space-y-3 font-mono text-sm">
-      {entries.map((entry, index) => {
+      {orderedEntries.map((entry, index) => {
         const tone = resolveTone(entry.level);
         const toneStyle = toneStyles[tone];
         const Icon = toneStyle.icon;

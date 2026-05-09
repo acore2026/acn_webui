@@ -13,6 +13,7 @@ import { LanguageMode, shellCopy } from './dashboard/i18n';
 import useWebSocket from './hooks/useWebSocket';
 import {
   BackendLogEntry,
+  TopologyAgentModel,
   ControlTask,
   DashboardMockData,
   NavKey,
@@ -25,6 +26,33 @@ import {
   VideoPlayerBootstrap,
   VideoTrackModel
 } from './dashboard/types';
+
+type AgentRosterEntry = {
+  id?: string;
+  name?: string;
+  role?: string;
+  status?: string;
+  priority?: string;
+  region?: string;
+  summary?: string;
+  taskCount?: number;
+  capabilities?: string[];
+  launchTime?: string;
+  offlineTime?: string;
+  lastHeartbeat?: string;
+  // Legacy fields supported while older payloads are still in flight.
+  agent_id?: string;
+  agent_name?: string;
+  agent_status?: string;
+  work_status?: string;
+  current_task?: string;
+  owner?: string;
+  network_capability?: string;
+  last_update?: string;
+  launch_time?: string;
+  offline_time?: string;
+  agent_capability?: string[] | string;
+};
 
 const emptyDashboardData: DashboardMockData = {
   metrics: [],
@@ -52,6 +80,166 @@ const buildDemoTiming = (speed: number) => {
     displayTtlSeconds,
     displayActiveSeconds: displayTtlSeconds
   };
+};
+
+const getAgentId = (agent: AgentRosterEntry) =>
+  String(agent.id ?? agent.agent_id ?? '').trim();
+
+const normalizeAgentCapabilities = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item).trim()).filter(Boolean);
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    return value
+      .split(',')
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+
+  return [];
+};
+
+const normalizeAgentStatus = (agent: AgentRosterEntry): TopologyAgentModel['status'] => {
+  const agentStatus = String(agent.status ?? agent.agent_status ?? '').toLowerCase();
+  const workStatus = String(agent.work_status ?? '').toLowerCase();
+
+  if (agentStatus === 'offline') {
+    return 'offline';
+  }
+
+  if (
+    agentStatus === 'working' ||
+    agentStatus === 'busy' ||
+    workStatus === 'working' ||
+    workStatus === 'tracking' ||
+    workStatus === 'expelling'
+  ) {
+    return 'busy';
+  }
+
+  return 'online';
+};
+
+const buildFallbackAgent = (agent: AgentRosterEntry, index: number): TopologyAgentModel => {
+  const agentId = getAgentId(agent);
+  const name = String(agent.agent_name ?? agent.name ?? agentId).trim() || agentId;
+  const capabilities = agent.capabilities?.length
+    ? agent.capabilities.map((item) => String(item).trim()).filter(Boolean)
+    : normalizeAgentCapabilities(agent.agent_capability);
+  const status = normalizeAgentStatus(agent);
+  const role =
+    String(agent.role ?? '').trim() ||
+    (capabilities[0]
+      ? capabilities[0].replace(/[-_]/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+      : 'General Agent');
+  const summary = String(agent.summary ?? '').trim();
+
+  return {
+    id: agentId,
+    name,
+    role,
+    status,
+    priority: String(agent.priority ?? '--'),
+    region: String(agent.region ?? agent.owner ?? agent.network_capability ?? 'ACN Mesh'),
+    trackSummary: 'No track',
+    tracks: [],
+    summary:
+      summary ||
+      `${name} is connected to the ACN mesh and awaiting the next assigned workflow.`,
+    uptime: status === 'offline' ? 'Unavailable' : '0m',
+    launchTime: String(agent.launchTime ?? agent.launch_time ?? '--'),
+    offlineTime:
+      status === 'offline'
+        ? String(agent.offlineTime ?? agent.offline_time ?? '--')
+        : String(agent.offlineTime ?? '--'),
+    lastHeartbeat: String(agent.lastHeartbeat ?? agent.last_update ?? 'Unknown'),
+    taskCount: Number.isFinite(Number(agent.taskCount))
+      ? Number(agent.taskCount)
+      : status === 'busy'
+        ? 1
+        : 0,
+    tasks: [],
+    capabilities: capabilities.length ? capabilities : ['General connectivity'],
+    alerts: [],
+    position: {
+      x: 0,
+      y: index * 8
+    }
+  };
+};
+
+const mergeAgentLists = (
+  snapshotAgents: TopologyAgentModel[],
+  agentList: AgentRosterEntry[]
+): TopologyAgentModel[] => {
+  const merged = new Map<string, TopologyAgentModel>();
+
+  snapshotAgents.forEach((agent) => {
+    merged.set(agent.id, { ...agent });
+  });
+
+  agentList.forEach((rawAgent, index) => {
+    const agentId = getAgentId(rawAgent);
+    if (!agentId) {
+      return;
+    }
+
+    const existing = merged.get(agentId);
+    if (!existing) {
+      merged.set(agentId, buildFallbackAgent(rawAgent, index));
+      return;
+    }
+
+    const name = String(rawAgent.agent_name ?? rawAgent.name ?? existing.name).trim() || existing.name;
+    const capabilities = rawAgent.capabilities?.length
+      ? rawAgent.capabilities.map((item) => String(item).trim()).filter(Boolean)
+      : normalizeAgentCapabilities(rawAgent.agent_capability);
+    const hasStatus =
+      rawAgent.status !== undefined ||
+      rawAgent.agent_status !== undefined ||
+      rawAgent.work_status !== undefined;
+    const status = hasStatus ? normalizeAgentStatus(rawAgent) : existing.status;
+    const role =
+      String(rawAgent.role ?? '').trim() ||
+      existing.role ||
+      (capabilities[0]
+        ? capabilities[0].replace(/[-_]/g, ' ').replace(/\b\w/g, (char) => char.toUpperCase())
+        : 'General Agent');
+    const region = String(rawAgent.region ?? '').trim() || existing.region || 'ACN Mesh';
+    const summary = String(rawAgent.summary ?? '').trim();
+    const taskCount = Number.isFinite(Number(rawAgent.taskCount))
+      ? Number(rawAgent.taskCount)
+      : existing.taskCount;
+    const launchTime = String(rawAgent.launchTime ?? rawAgent.launch_time ?? existing.launchTime ?? '--');
+    const offlineTime =
+      status === 'offline'
+        ? String(rawAgent.offlineTime ?? rawAgent.offline_time ?? existing.offlineTime ?? '--')
+        : existing.offlineTime;
+    const lastHeartbeat = String(
+      rawAgent.lastHeartbeat ?? rawAgent.last_update ?? existing.lastHeartbeat ?? 'Unknown'
+    );
+
+    merged.set(agentId, {
+      ...existing,
+      id: agentId,
+      name,
+      role,
+      status,
+      priority: String(rawAgent.priority ?? existing.priority ?? '--'),
+      region,
+      summary: summary || existing.summary,
+      launchTime,
+      offlineTime,
+      lastHeartbeat,
+      taskCount: Number.isFinite(taskCount) ? taskCount : existing.taskCount,
+      capabilities: capabilities.length ? capabilities : existing.capabilities
+    });
+  });
+
+  return Array.from(merged.values()).sort((left, right) =>
+    String(left.name || left.id).localeCompare(String(right.name || right.id))
+  );
 };
 
 const parseOptionalJson = async <T,>(response: Response): Promise<T | null> => {
@@ -83,6 +271,7 @@ const App = () => {
   const [elementLogs, setElementLogs] = useState<NetworkElementLogGroup[]>([]);
   const [elementLogsLoading, setElementLogsLoading] = useState(true);
   const [elementLogsError, setElementLogsError] = useState<string | null>(null);
+  const [agentList, setAgentList] = useState<AgentRosterEntry[]>([]);
   const [networkElementControls, setNetworkElementControls] = useState<NetworkElementControlModel[]>([]);
   const [networkElementBusyKey, setNetworkElementBusyKey] = useState<string | null>(null);
   const [networkElementLastResult, setNetworkElementLastResult] = useState<NetworkElementControlResult | null>(null);
@@ -131,6 +320,20 @@ const App = () => {
   const { connected, lastMessage } = useWebSocket(wsUrl);
   const copy = shellCopy[language];
   const isZh = language === 'zh';
+  const mergedAgents = useMemo(
+    () => mergeAgentLists(dashboardData.topology.agents, agentList),
+    [agentList, dashboardData.topology.agents]
+  );
+  const dashboardViewData = useMemo(
+    () => ({
+      ...dashboardData,
+      topology: {
+        ...dashboardData.topology,
+        agents: mergedAgents
+      }
+    }),
+    [dashboardData, mergedAgents]
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -379,6 +582,16 @@ const App = () => {
         type?: string;
         payload?: unknown;
       };
+
+      if (data.type === 'AGENT_LIST' && data.payload && typeof data.payload === 'object') {
+        const payload = data.payload as { agents?: unknown };
+        setAgentList(
+          Array.isArray(payload.agents)
+            ? (payload.agents.filter((agent): agent is AgentRosterEntry => Boolean(agent) && typeof agent === 'object') as AgentRosterEntry[])
+            : []
+        );
+        return;
+      }
 
       if (data.type === 'DASHBOARD_SNAPSHOT') {
         applySnapshot(data.payload as DashboardMockData);
@@ -696,14 +909,14 @@ const App = () => {
   );
 
   const agentSummary = useMemo(() => {
-    const agents = dashboardData.topology.agents;
+    const agents = mergedAgents;
 
     return {
       online: agents.filter((agent) => agent.status === 'online').length,
       busy: agents.filter((agent) => agent.status === 'busy').length,
       offline: agents.filter((agent) => agent.status === 'offline').length
     };
-  }, [dashboardData.topology.agents]);
+  }, [mergedAgents]);
 
   const handleOverviewMetricSelect = useCallback((metricId: string) => {
     if (metricId === 'agents') {
@@ -899,7 +1112,7 @@ const App = () => {
       case 'agents':
         return (
           <AgentsPage
-            agents={dashboardData.topology.agents}
+            agents={mergedAgents}
             videoTracks={videoTracks}
             videoTracksLoading={videoTracksLoading}
             videoTracksError={videoTracksError}
@@ -923,7 +1136,7 @@ const App = () => {
       case 'control':
         return (
           <ControlPage
-            agents={dashboardData.topology.agents}
+            agents={mergedAgents}
             tasks={controlTasks}
             tasksLoading={controlTasksLoading}
             tasksError={controlTasksError}
@@ -946,7 +1159,7 @@ const App = () => {
       default:
         return (
           <OverviewPage
-            data={dashboardData}
+            data={dashboardViewData}
             language={language}
             onMetricSelect={handleOverviewMetricSelect}
           />

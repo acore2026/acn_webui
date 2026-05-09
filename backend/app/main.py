@@ -892,6 +892,19 @@ def _sync_agent_work_status_from_tasks(
     normalized_agent_id = str(agent_id or "").strip()
     if not normalized_agent_id:
         return
+
+    conn = _connect_local_cache_db()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT 1 FROM agents WHERE agent_id = ?",
+            (normalized_agent_id,),
+        )
+        if cursor.fetchone() is None:
+            return
+    finally:
+        conn.close()
+
     has_processing_tasks = _agent_has_processing_tasks(normalized_agent_id)
     _upsert_local_agent(
         normalized_agent_id,
@@ -2387,6 +2400,42 @@ def _merge_agent_sources() -> List[Dict[str, Any]]:
     )
 
 
+def _build_agent_roster() -> List[Dict[str, Any]]:
+    roster: List[Dict[str, Any]] = []
+    claim_name_lookup = _agent_claim_name_lookup()
+    for index, agent in enumerate(_merge_agent_sources()):
+        agent_id = str(agent.get("agent_id") or f"agent-{index}").strip()
+        if not agent_id:
+            continue
+
+        display_name = _resolve_agent_display_name(agent, claim_name_lookup)
+        status = _dashboard_status_from_agent(agent)
+        launch_time = agent.get("launch_time") or agent.get("last_update")
+        offline_time = agent.get("offline_time") if status == "offline" else None
+        capabilities = _normalize_capabilities(agent.get("agent_capability"))
+
+        roster.append(
+            {
+                "id": agent_id,
+                "name": display_name,
+                "role": _dashboard_role_from_agent(agent),
+                "status": status,
+                "priority": str(agent.get("priority") or "--"),
+                "region": _dashboard_region_from_agent(agent),
+                "summary": _dashboard_summary_from_agent(agent),
+                "taskCount": _get_agent_processing_task_count(agent_id),
+                "capabilities": capabilities or ["General connectivity"],
+                "launchTime": _format_timestamp_display(launch_time),
+                "offlineTime": _format_timestamp_display(offline_time) if offline_time else "--",
+                "lastHeartbeat": _format_relative_time(
+                    agent.get("last_update") or datetime.utcnow().isoformat()
+                ),
+            }
+        )
+
+    return roster
+
+
 def _dashboard_position(index: int) -> Dict[str, int]:
     columns = 3
     column = index % columns
@@ -3410,7 +3459,7 @@ app.add_middleware(
 @app.get("/api/agents", response_model=Dict[str, Any])
 async def get_agents():
     """Get all registered agents"""
-    agents = _merge_agent_sources()
+    agents = _build_agent_roster()
     return {"agents": agents, "timestamp": datetime.utcnow().isoformat()}
 
 
@@ -4662,7 +4711,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
     try:
         # Send initial data
-        agents = _merge_agent_sources()
+        agents = _build_agent_roster()
         await manager.send_to(
             websocket, {"type": "AGENT_LIST", "payload": {"agents": agents}}
         )
@@ -4723,7 +4772,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         control_task_history.clear()
                         _reset_local_cache_state()
                         # Get fresh agent list after clear
-                        agents = _merge_agent_sources()
+                        agents = _build_agent_roster()
 
                         # Broadcast refresh completion to all clients
                         await manager.broadcast(
@@ -4772,7 +4821,7 @@ async def broadcast_agent_updates():
 
         if manager.active_connections:
             try:
-                agents = _merge_agent_sources()
+                agents = _build_agent_roster()
                 await manager.broadcast(
                     {"type": "AGENT_LIST", "payload": {"agents": agents}}
                 )

@@ -350,6 +350,9 @@ const resolveBubbleLaneGroup = (source: string, target: string) => {
 
 const resolveBubblePlacementOverride = (edge: MessageFlowEdgeModel) => {
   const messageText = `${edge.lastMessage} ${edge.source} ${edge.target}`.toLowerCase();
+  const isArfIdmEdge =
+    (edge.source === 'ARF' && edge.target === 'IDM') ||
+    (edge.source === 'IDM' && edge.target === 'ARF');
   const isVcVerification =
     messageText.includes('vc-verification') ||
     messageText.includes('vc-verifications') ||
@@ -357,14 +360,14 @@ const resolveBubblePlacementOverride = (edge: MessageFlowEdgeModel) => {
     messageText.includes('vc-vertifications');
 
   if (!isVcVerification) {
-    return {};
+    return isArfIdmEdge ? { bubbleOffsetY: -24 } : {};
   }
 
   return {
     bubbleAnchor: 'mid' as const,
     bubbleLaneOffset: 0,
     bubbleOffsetX: 130,
-    bubbleOffsetY: -86
+    bubbleOffsetY: isArfIdmEdge ? -110 : -86
   };
 };
 
